@@ -9,30 +9,27 @@
     │   │   Node.m                          # Класс, описывающий вершины графа
     │   │   NodeColor.m                     # Перечисление для определения типа вершины (черная / белая)
     │   │
-    │   ├───+CustomMatrix                   #
-    │   │       BWMatrix.m                  #
-    │   │       BWRow.m                     #
+    │   ├───+CustomMatrix                   # Пространство имен для описания матрицы из векторов произвольной длины
+    │   │       BWMatrix.m                  # Класс, описывающий матрицу и базовые операции
+    │   │       BWRow.m                     # Класс, описывающий вектор-строку произвольной длины
     │   │
-    │   ├───+RandomGenerator                #
-    │   │       AlphaGenerator.m            #
-    │   │       BetaGenerator.m             #
-    │   │       IRandomGen.m                #
+    │   ├───+RandomGenerator                # Пространство имен для генераторов первичной инициализации параметров рёбер
+    │   │       AlphaGenerator.m            # Пример класса для инициализации параметров альфа
+    │   │       BetaGenerator.m             # пример класса для инициализации параметров бета
+    │   │       IRandomGen.m                # Интерфейс, имплементация которого обязательна для всех будущих генераторов
     │   │
-    │   └───+Trainer                        #
-    │           Trainer.m                   #
+    │   └───+Trainer                        # Пространство имен, содержащие оболочку, контролирующую настройку модели
+    │           Trainer.m                   # Класс, контролирующий настройку модели
     │
-    ├───+coreFunctions                      #   
-    │       HeatTransferBC.m                #
-    │       ICoreF.m                        #
-    │       LinearFunction.m                #
-    │       LinearRegression.m              #
-    │       SigmoidFunction.m               #
-    └───    SimpleAddingCoreFunction.m      #
+    ├───+coreFunctions                      # Пространство имен, содержащие пример ядровых функций и интерфейс для них
+    │       HeatTransferBC.m                # Пример ядровой функции на основе уравнения теплового баланса
+    │       ICoreF.m                        # Интерфейс ядровых функций, имплементация которого обязательна для всех будущих ядровых функций
+    │       LinearFunction.m                # Пример простой линейной функции ядра
+    │       LinearRegression.m              # Пример регрессионной функции ядра
+    │       SigmoidFunction.m               # Пример сигмоидальной функции ядра
+    └───    SimpleAddingCoreFunction.m      # Пример суммирующей функции ядра
   
 ```
-
-General language is MATLAB .m classes by inner OOP
-
 
 ## Examples
 ```matlab
