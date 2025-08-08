@@ -1,5 +1,5 @@
 # Экспериментальная библиотека для модели черно-белого графа (v.0.2)
-Структура проекта
+## Структура проекта:
 ```
     MyGraphLib
     
@@ -9,89 +9,235 @@
     │   │   Node.m                          # Класс, описывающий вершины графа
     │   │   NodeColor.m                     # Перечисление для определения типа вершины (черная / белая)
     │   │
-    │   ├───+CustomMatrix                   #
-    │   │       BWMatrix.m                  #
-    │   │       BWRow.m                     #
+    │   ├───+CustomMatrix                   # Пространство имен для описания матрицы из векторов произвольной длины
+    │   │       BWMatrix.m                  # Класс, описывающий матрицу и базовые операции
+    │   │       BWRow.m                     # Класс, описывающий вектор-строку произвольной длины
     │   │
-    │   ├───+RandomGenerator                #
-    │   │       AlphaGenerator.m            #
-    │   │       BetaGenerator.m             #
-    │   │       IRandomGen.m                #
+    │   ├───+RandomGenerator                # Пространство имен для генераторов первичной инициализации параметров рёбер
+    │   │       AlphaGenerator.m            # Пример класса для инициализации параметров альфа
+    │   │       BetaGenerator.m             # пример класса для инициализации параметров бета
+    │   │       IRandomGen.m                # Интерфейс, имплементация которого обязательна для всех будущих генераторов
     │   │
-    │   └───+Trainer                        #
-    │           Trainer.m                   #
+    │   └───+Trainer                        # Пространство имен, содержащие оболочку, контролирующую настройку модели
+    │           Trainer.m                   # Класс, контролирующий настройку модели
     │
-    ├───+coreFunctions                      #   
-    │       HeatTransferBC.m                #
-    │       ICoreF.m                        #
-    │       LinearFunction.m                #
-    │       LinearRegression.m              #
-    │       SigmoidFunction.m               #
-    └───    SimpleAddingCoreFunction.m      #
+    ├───+coreFunctions                      # Пространство имен, содержащие пример ядровых функций и интерфейс для них
+    │       HeatTransferBC.m                # Пример ядровой функции на основе уравнения теплового баланса
+    │       ICoreF.m                        # Интерфейс ядровых функций, имплементация которого обязательна для всех будущих ядровых функций
+    │       LinearFunction.m                # Пример простой линейной функции ядра
+    │       LinearRegression.m              # Пример регрессионной функции ядра
+    │       SigmoidFunction.m               # Пример сигмоидальной функции ядра
+    └───    SimpleAddingCoreFunction.m      # Пример суммирующей функции ядра
   
 ```
-
-General language is MATLAB .m classes by inner OOP
-
-
-## Examples
+## Пример использования
 ```matlab
-    rng(42); % Фиксируем seed для воспроизводимости
-    % Инициализация
-    A = [0 1 1 1; 1 0 1 1; 1 1 0 1; 1 1 1 0];
-    num_vertex = size(A, 1);
-    
-    % Создание модели
-    HeatBC = coreFunctions.HeatTransferBC(320.0, 0.72);
-    model_shell = statModel.ModelShell(A, 30, HeatBC);
-    op = statModel.OptimizationMachine(model_shell);
-    
-    % Генерация данных с учетом индивидуальных характеристик вершин
-    num_samples = 100;
-    XData = zeros(HeatBC.GetNumOfInputParams, num_vertex, num_samples);
-    YData = zeros(1, num_vertex, num_samples);
-    
-    for i = 1:num_samples
-        target = 1100 + randi([-50,50],1,4);
-        infTemp = 1050 + randi([-30,30],1,4);
-        surfTemp = 1200 + randi([-40,40],1,4);
-        
-        XData(:,:,i) = [target; infTemp; surfTemp];
-        YData(:,:,i) = target;
+%% Генерация данных
+import BWGraph.*;
+import BWGraph.CustomMatrix.*;
+import BWGraph.RandomGenerator.*;
+import BWGraph.Trainer.*;
+import coreFunctions.*;
+
+rng(2);
+% Общая функция для всех вершин
+CoreF = LinearFunction();
+alfaGen = AlphaGenerator(0.9);
+betaGen = BetaGenerator(1);
+
+nodeA = Node(1, 30, "White", CoreF);
+nodeB = Node(2, 30, "Black", []);
+nodeC = Node(3, 30, "Black", []);
+nodeD = Node(4, 30, "Black", []);
+
+nodeA.addEdge(nodeB);
+nodeA.addEdge(nodeC);
+nodeA.addEdge(nodeD);
+
+% Индивидуальные параметры для вершин (общие для всех экспериментов)
+NodeSize = [1 1 1 1]; % Коэффициенты 
+NodeWeight = [1 1 1 1]; % Весовые коэффициенты вершин
+
+% Создаем графовую модель
+modelShell = GraphShell(alfaGen, betaGen,  nodeA, nodeB, nodeC, nodeD);
+
+% Создаем входные данные
+% Генерация данных с учетом индивидуальных характеристик вершин
+numSamples = 500;
+numOfNodes = numel(modelShell.ListOfNodes);
+numOfWhiteNodes = modelShell.GetNumOfWhiteNode; % Получаем количество вершин
+numInputParams = CoreF.GetNumOfInputParams(); % Получаем количество входных параметров
+XData = repmat(BWMatrix(), numSamples, 1);
+YData = repmat(BWMatrix(), numSamples, 1);
+
+for i = 1:numSamples 
+    xM = zeros(numInputParams,1);
+    x = randi([-10,10]);
+    for j = 1:numOfNodes
+        for k = 1:numInputParams
+            xM(k) = x;
+        end
+        XData(i) = XData(i).addRow(xM);
+    end 
+end
+
+for i = 1:numSamples
+    yM = zeros(1,numOfWhiteNodes);
+    for j = 1:numOfWhiteNodes
+         yM(j) = 10*XData(i).getRow(j) - 50;
     end
-    
-    indices = randperm(num_samples);
-    split_point = round(0.8 * num_samples);
-    train_indices = indices(1:split_point);
-    test_indices = indices(split_point+1:end);
-    
-    % Определим обучающую и тестовую выборку
-    XData_train = XData(:, :, train_indices);
-    YData_train = YData(:, :, train_indices);
-    XData_test = XData(:, :, test_indices);
-    YData_test = YData(:, :, test_indices);
-    
-    % Индивидуальные параметры для вершин
-    vertex_regul_weight = [1.2, 1.1, 1.3, 1.1]; % Коэффициенты 
-    vertex_weights = [1.0, 1.0, 1.0, 1.0]; % Весовые коэффициенты вершин
-    
-    % Вызываем цикл настройки
-    op.Train(XData_train, YData_train, XData_test, YData_test, 32, 0.001, 0.9, 0.99, 1e-8, vertex_weights, ...
-        vertex_regul_weight, 5000);
-    
-    % Тестирование
-    model = op.GetModelShell();
-    test_err = op.test_errors;
-    
-    test_output = YData(1,:,size(YData,3));
-    test_input = XData(:,:,size(XData,3));
-    model.Forward(test_input);
-    total_result = model.GetResult();
-    
-    fprintf('Результат по лучшим параметрам:\nA1 = %.1f\nA2 = %.1f\nA3 = %.1f\nA4 = %.1f\n', total_result);
-    fprintf('Ожидаемые результаты:\nA1 = %.1f\nA2 = %.1f\nA3 = %.1f\nA4 = %.1f\n', test_output);
-    fprintf('Ошибки:\nA1 = %.1f\nA2 = %.1f\nA3 = %.1f\nA4 = %.1f\n', total_result - test_output);
-    fprintf('Средняя ошибка:\nMAE = %.1f\n', mae(total_result,test_output));
-    
-    plot(test_err);
+    YData(i) = YData(i).addRow(yM);
+end
+
+% Делим выборку на подвыборки 80(обуч)% / 20(тест)%
+indices = randperm(numSamples);
+splitPoint = round(0.8 * numSamples);
+trainIndices = indices(1:splitPoint);
+testIndices = indices(splitPoint+1:end);
+
+% Определим обучающую и тестовую выборку
+XDataTrain = XData(trainIndices);
+YDataTrain = YData(trainIndices);
+XDataTest = XData(testIndices);
+YDataTest = YData(testIndices);
+
+%% Строим диаграммы распределения (опционально)
+% Данные для диаграммы
+trainCount = length(trainIndices);
+testCount = length(testIndices);
+sizes = [trainCount, testCount];
+
+% Подписи с количеством данных
+labels = {
+    sprintf('Обучающая (%d)', trainCount), ...
+    sprintf('Тестовая (%d)', testCount)
+};
+
+% Создаем фигуру и настраиваем шрифт
+figure;
+set(gcf, 'DefaultTextFontName', 'Times New Roman');
+set(gcf, 'DefaultAxesFontName', 'Times New Roman');
+set(gcf, 'DefaultAxesFontSize', 14);
+
+% Круговая диаграмма с выделением обучающей выборки
+explode = [1 0]; % Выделяем обучающую выборку
+h = pie(sizes, explode, labels);
+
+% Устанавливаем красно-синюю цветовую схему
+colors = [0.7 0.1 0.1; 0.1 0.3 0.7]; % [красный; синий]
+colormap(colors);
+
+% Настраиваем заголовок с увеличенным шрифтом
+title(sprintf('Разбиение данных: %d (обуч) / %d (тест)', trainCount, testCount), ...
+      'FontSize', 14, 'FontWeight', 'bold');
+
+legend(labels, 'Location', 'best', 'FontSize', 12);
+
+%% Отрисовка структуры графа
+modelShell.DrawGraph("Структура модели до настройки");
+
+%% Настройка модели
+% Задаем настройщик
+trainer = Trainer(modelShell, 30);
+% Вызываем настройщик
+trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest, 0.1, 0.1, 0.1, 1e-8, NodeSize, NodeWeight, 200, 1e12, -1e12, 1.0, 1.0);
+
+%% Тестирование модели
+
+whiteIdx = modelShell.GetWhiteNodesIndices;
+numTestSamples = numel(YDataTest);
+actualValue = zeros(1, numTestSamples);
+predictionValue = zeros(1, numTestSamples);
+
+for j = 1 : numTestSamples
+    modelShell.Forward(XDataTest(j));
+    actual = YDataTest(j).getRow(1);
+    predict = modelShell.GetModelResults();
+    predictionValue(j) = mean(predict(whiteIdx));
+    actualValue(j) = mean(actual);
+end
+
+% Строим график сравнения
+figure;
+hold on;
+grid on;
+
+% Рисуем линии фактических и модельных значений
+plot(1:numTestSamples, actualValue, 'b-o', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Фактические значения');
+plot(1:numTestSamples, predictionValue, 'r--s', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Модельные значения');
+
+% Настраиваем график
+xlabel('Номер тестового примера');
+ylabel('Значение');
+title('Сравнение модельных и фактических значений на тестовой выборке');
+legend('show', 'Location', 'best');
+
+% Добавляем линию нуля (если нужно)
+% line([1 numTestSamples], [0 0], 'Color', 'k', 'LineStyle', '--');
+
+hold off;
+%% Валидация
+rng(123)
+validSamples = 50;
+XDataValid = repmat(BWMatrix(), validSamples, 1);
+YDataValid = repmat(BWMatrix(), validSamples, 1);
+
+for i = 1:validSamples 
+    xM = zeros(numInputParams,1);
+    for j = 1:numOfNodes
+        for k = 1:numInputParams
+            xM(k) = randi([20,30]);
+        end
+        XDataValid(i) = XDataValid(i).addRow(xM);
+    end 
+end
+
+for i = 1:validSamples
+    yM = zeros(1,numOfWhiteNodes);
+    for j = 1:numOfWhiteNodes
+         yM(j) = 10*XDataValid(i).getRow(j)-50;
+    end
+    YDataValid(i) = YDataValid(i).addRow(yM);
+end
+
+validValue = zeros(1,validSamples);
+predictOnValid = zeros(1,validSamples);
+
+for j = 1:validSamples
+    modelShell.Forward(XDataValid(j));
+    forecast = modelShell.GetModelResults();
+    actual = YDataValid(j).getRow(1);
+    validValue(j) = mean(actual);
+    predictOnValid(j) = mean(forecast(whiteIdx));
+end
+
+% Строим график сравнения
+figure;
+hold on;
+grid on;
+
+% Рисуем линии фактических и модельных значений
+plot(1:validSamples, validValue, 'b-o', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Фактические значения');
+plot(1:validSamples, predictOnValid, 'r-o', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Модельные значения');
+
+% Настраиваем график
+xlabel('Номер тестового примера');
+ylabel('Значение');
+title('Сравнение модельных и фактических значений на тестовой выборке');
+legend('show', 'Location', 'best');
+
+% Добавляем линию нуля (если нужно)
+% line([1 numTestSamples], [0 0], 'Color', 'k', 'LineStyle', '--');
+
+hold off;
+
+%% Анализ метрик
+fprintf('Результирующее MAE на валидации %2.3f\n', mae(predictOnValid,validValue))
+fprintf('Результирующее MAPE на валидации %2.3f\n', mape(validValue, predictOnValid))
+
+fprintf('Результирующее MAE на тесте %2.3f\n', mae(predictionValue,actualValue))
+fprintf('Результирующее MAPE на тесте %2.3f\n', mape(actualValue,predictionValue))
+
+%% Отобразить граф
+modelShell.DrawGraph("Структура модели после настройки");
 ```
