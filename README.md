@@ -1,5 +1,35 @@
-# Библиотека для графовой модели
-
+# Экспериментальная библиотека для модели черно-белого графа (v.0.2)
+Структура проекта
+```
+    MyGraphLib
+    
+    ├───+BWGraph                            # Пространство имен модели черно-белого графа
+    │   │   Edge.m                          # Класс, описывающие рёбра графа
+    │   │   GraphShell.m                    # Класс-оболочка графа
+    │   │   Node.m                          # Класс, описывающий вершины графа
+    │   │   NodeColor.m                     # Перечисление для определения типа вершины (черная / белая)
+    │   │
+    │   ├───+CustomMatrix                   #
+    │   │       BWMatrix.m                  #
+    │   │       BWRow.m                     #
+    │   │
+    │   ├───+RandomGenerator                #
+    │   │       AlphaGenerator.m            #
+    │   │       BetaGenerator.m             #
+    │   │       IRandomGen.m                #
+    │   │
+    │   └───+Trainer                        #
+    │           Trainer.m                   #
+    │
+    ├───+coreFunctions                      #   
+    │       HeatTransferBC.m                #
+    │       ICoreF.m                        #
+    │       LinearFunction.m                #
+    │       LinearRegression.m              #
+    │       SigmoidFunction.m               #
+    │       SimpleAddingCoreFunction.m      #
+  
+```
 
 General language is MATLAB .m classes by inner OOP
 
