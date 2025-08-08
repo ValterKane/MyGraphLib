@@ -34,7 +34,7 @@ classdef BWMatrix
             %   addRow Добавляет новую строку в матрицу
             %   rowData - массив данных для новой строки
             
-            newRow = JaggedRow(rowData);
+            newRow = BWGraph.CustomMatrix.BWRow(rowData);
             obj.Rows(end+1) = newRow;
         end
         
@@ -72,7 +72,7 @@ classdef BWMatrix
         %% Визуализация матрицы
         function display(obj)
             %display Выводит матрицу в консоль
-            fprintf('JaggedMatrix (%d rows):\n', obj.rowCount());
+            fprintf('Matrix have (%d rows):\n', obj.rowCount());
             for i = 1:obj.rowCount()
                 fprintf('Row %d: ', i);
                 fprintf('%g ', obj.getRow(i));

@@ -1,31 +1,45 @@
 classdef Node < handle
-    properties (Access = private)
-        ID (:,:) {mustBePositive}                   % Номер вершины
+    properties (Access = private) 
         OutEdgesMap                                 % Список соседних вершин
         NodeType BWGraph.NodeColor                  % Цвет вершины
         NodeFunction                                % Функции вершин
         FResult double                              % Значение в вершине
-        RandomGenerator                             % Объект для генерации альфа и бета
+        
+    end
+
+    properties (Access = public)
+         ID (:,:) {mustBePositive}                   % Номер вершины
     end
     
     methods
-        function obj = Node(ID, initialValue, nodeType, nodeFunction, randomGenFunction)
+        function obj = Node(ID, initialValue, nodeType, nodeFunction)
             arguments
                 ID {mustBePositive}
                 initialValue {mustBeFinite}
                 nodeType BWGraph.NodeColor
-                nodeFunction coreFunctions.IBoundary
-                randomGenFunction BWGraph.RandomGenerator.IRandomGen
+                nodeFunction
+            end
+            
+            % Проверка: nodeFunction может быть пустым только для White узлов
+            if isempty(nodeFunction) && (nodeType ~= BWGraph.NodeColor.Black)
+                error('NodeFunction может быть пустой только для черных вершин!');
+            end
+
+            % Проверка типа, если nodeFunction не пустой
+            if ~isempty(nodeFunction) && ~isa(nodeFunction, 'coreFunctions.ICoreF')
+                error('NodeFunction должен реализовывать интерфейс coreFunctions.ICoreF.');
             end
 
             % Инициализация объекта
             obj.ID = ID;
-            obj.OutEdgesMap = dictionary(); % Инициализация dictionary без ограничений типов
+            obj.OutEdgesMap = dictionary(BWGraph.Node.empty, BWGraph.Edge.empty); % Инициализация dictionary без ограничений типов
             obj.NodeType = nodeType;
             obj.NodeFunction = nodeFunction;
-            obj.RandomGenerator = randomGenFunction;
             obj.FResult = initialValue;
+        end
 
+        function res = getNodeType(obj)
+            res = obj.NodeType;
         end
 
         function addEdge(obj, targetNode)
@@ -39,10 +53,7 @@ classdef Node < handle
                 error('Ребро в эту вершину уже существует');
             end
 
-            alfa = obj.RandomGenerator.Generate();
-            beta = obj.RandomGenerator.Generate();
-
-            newEdge = BWGraph.Edge(obj, targetNode, alfa, beta);
+            newEdge = BWGraph.Edge(obj, targetNode, 1, 1);
             obj.OutEdgesMap(targetNode) = newEdge;
         end
 
@@ -105,13 +116,21 @@ classdef Node < handle
         end
 
         function res = calcNodeFunc(obj, inputData)
-            res = obj.NodeFunction.CalcCoreFunction(inputData);
+            if isempty(obj.NodeFunction)
+                res = 0;
+            else
+                res = obj.NodeFunction.CalcCoreFunction(inputData);
+            end
         end
 
         function res = getOutEdgesMap(obj)
             res = obj.OutEdgesMap;
         end
 
+        function func = getNodeFunction(obj)
+            func = obj.NodeFunction;
+        end
+        
     end
    
 end

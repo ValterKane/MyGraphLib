@@ -1,4 +1,4 @@
-classdef HeatTransferBC < coreFunctions.IBoundary
+classdef HeatTransferBC < coreFunctions.ICoreF
     % Класс для расчета граничных условий 3-го рода (смешанных)
     % с учетом конвекции и излучения
 
@@ -38,6 +38,32 @@ classdef HeatTransferBC < coreFunctions.IBoundary
             result = 3;
         end
 
+        function data = save(obj)
+            % Сериализация объекта в структуру
+            data = struct();
+            data.ClassName = class(obj);
+            data.h = obj.h;
+            data.epsilon = obj.epsilon;
+            data.sigma = obj.sigma;
+        end
         
+        function load(obj, data)
+            % Десериализация объекта из структуры
+            if ~strcmp(data.ClassName, class(obj))
+                error('Class mismatch during loading');
+            end
+            obj.h = data.h;
+            obj.epsilon = data.epsilon;
+            obj.sigma = data.sigma;
+        end
+ 
+    end
+
+    methods (Static)
+        function obj = createFromData(data)
+            % Фабричный метод для создания экземпляра при загрузке
+            obj = HeatTransferBC();
+            obj.load(data);
+        end
     end
 end
