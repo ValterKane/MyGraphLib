@@ -27,7 +27,7 @@
     │       LinearFunction.m                #
     │       LinearRegression.m              #
     │       SigmoidFunction.m               #
-    │       SimpleAddingCoreFunction.m      #
+    └───    SimpleAddingCoreFunction.m      #
   
 ```
 
