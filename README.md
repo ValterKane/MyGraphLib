@@ -1,7 +1,35 @@
-# My Graph Lib -- little pack for my researches
-There is a small pack for graph-base model with universal core function inside
-Pack includes model shell by my own and optimization machine for set-up model's coeff by training and test data
-Optimization machine general matter is modify Adam optimizator for graph-base model
+# Экспериментальная библиотека для модели черно-белого графа (v.0.2)
+Структура проекта
+```
+    MyGraphLib
+    
+    ├───+BWGraph                            # Пространство имен модели черно-белого графа
+    │   │   Edge.m                          # Класс, описывающие рёбра графа
+    │   │   GraphShell.m                    # Класс-оболочка графа
+    │   │   Node.m                          # Класс, описывающий вершины графа
+    │   │   NodeColor.m                     # Перечисление для определения типа вершины (черная / белая)
+    │   │
+    │   ├───+CustomMatrix                   #
+    │   │       BWMatrix.m                  #
+    │   │       BWRow.m                     #
+    │   │
+    │   ├───+RandomGenerator                #
+    │   │       AlphaGenerator.m            #
+    │   │       BetaGenerator.m             #
+    │   │       IRandomGen.m                #
+    │   │
+    │   └───+Trainer                        #
+    │           Trainer.m                   #
+    │
+    ├───+coreFunctions                      #   
+    │       HeatTransferBC.m                #
+    │       ICoreF.m                        #
+    │       LinearFunction.m                #
+    │       LinearRegression.m              #
+    │       SigmoidFunction.m               #
+    └───    SimpleAddingCoreFunction.m      #
+  
+```
 
 General language is MATLAB .m classes by inner OOP
 
