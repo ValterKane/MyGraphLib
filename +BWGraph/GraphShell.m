@@ -467,6 +467,7 @@ classdef GraphShell < handle
 
                 % Вычисление производной для исходящего ребра
                 derivative = (-1 + sum_in_terms) / (1 + sum_alpha_out);
+                % derivative = -1  / (1 + sum_alpha_out);
 
                 derivatives.outgoing(i).edge = edge;
                 derivatives.outgoing(i).derivative = derivative;

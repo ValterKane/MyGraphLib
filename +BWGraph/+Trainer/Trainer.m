@@ -40,7 +40,7 @@ classdef Trainer < handle
 
         % -- Параметры настройки на плато ---
         plateauCount = 0;         % Счетчик плато
-        maxPlateauCount = 5;     % Максимальное количество плато перед остановкой
+        maxPlateauCount = 10;     % Максимальное количество плато перед остановкой
         randomShiftScale = 0.2;  % Масштаб случайного смещения параметров
         % -----------------------------------
     end
@@ -77,7 +77,7 @@ classdef Trainer < handle
                 ClipDown        {mustBeFinite}
                 TargetError     {mustBePositive, mustBeFinite}
                 Lambda          {mustBePositive}
-                Lambda_Agg          {mustBePositive}
+                Lambda_Agg          {mustBeNonnegative}
                 targetNodeIndices = [] % По умолчанию анализируются все белые вершины
                 errorMetric = 'mae'
             end
@@ -141,7 +141,7 @@ classdef Trainer < handle
 
             for epoch = 1:obj.numEpoch
                 % Динамическое уменьшение LR
-                if mod(epoch, 10) == 0
+                if mod(epoch, 100) == 0
                     obj.learningRate = max(obj.minLr, LearningRate / sqrt(epoch));
                 end
 
@@ -171,7 +171,7 @@ classdef Trainer < handle
                 if epoch > 1
                     if errorDiffs(epoch) > errorDiffs(epoch-1) + 1e-3
                         diffIncreaseCount = diffIncreaseCount + 1;
-                        fprintf('Увеличение разницы ошибок (переобучение) %d/5\n', diffIncreaseCount);
+                        fprintf('Увеличение разницы ошибок (переобучение) %d/10\n', diffIncreaseCount);
                     else
                         diffIncreaseCount = max(0, diffIncreaseCount - 1);
                     end
@@ -198,7 +198,7 @@ classdef Trainer < handle
                 stopReason = '';
 
                 % 1. Критерий переобучения (увеличение разницы ошибок)
-                if diffIncreaseCount >= 5
+                if diffIncreaseCount >= 10
                     stopTraining = true;
                     stopReason = 'Обнаружено переобучение (разница ошибок увеличивается 5 эпох подряд)';
                 end
@@ -494,7 +494,7 @@ classdef Trainer < handle
                 NodesLRScale    (1,:)      % Масштабирование LR для вершин,
                 ClipUp          {mustBeFinite},
                 ClipDown        {mustBeFinite},
-                Lambda          {mustBePositive}
+                Lambda          {mustBeFinite}
             end
 
             % --- Инициализация параметров ---
@@ -810,9 +810,6 @@ classdef Trainer < handle
                     targetErrors = errors(targetWhiteIndices);
                     meanTargetError = mean(targetErrors);
 
-                    % Добавление усредненной ошибки к белым вершинам
-                    errors(obj.whiteNodeIndices) = errors(obj.whiteNodeIndices) + lambda_Agg * meanTargetError;
-
                     % Распространение ошибок для черных вершин
                     if ~isempty(obj.blackNodeIndices)
                         maxIter = 10;
@@ -859,6 +856,9 @@ classdef Trainer < handle
                         end
                     end
 
+                    % Добавление усредненной ошибки к белым вершинам
+                    errors = errors + lambda_Agg * meanTargetError;
+
                     % Предварительное вычисление производных
                     alphaDerivativesCache = cell(numNodes, 1);
                     betaDerivativesCache = cell(numNodes, 1);
@@ -882,8 +882,12 @@ classdef Trainer < handle
                             edgeIndices = [alphaDerivs.outgoing.edge];
                             [~, edgeOrder] = ismember(edgeIndices, edges);
                             derivatives = [alphaDerivs.outgoing.derivative];
+
+                            % Получаем текущие значения alpha для регуляризации
+                            currentAlphas = (arrayfun(@(e) e.Alfa, edges))';
+
                             batchAlGrad{i}(edgeOrder) = batchAlGrad{i}(edgeOrder) - ...
-                                derivatives * errors(i) * weight;
+                                derivatives * errors(i) * weight + Lambda * currentAlphas;
                         end
 
                         % Градиенты для beta
@@ -891,8 +895,12 @@ classdef Trainer < handle
                             edgeIndices = [betaDerivs.outgoing.edge];
                             [~, edgeOrder] = ismember(edgeIndices, edges);
                             derivatives = [betaDerivs.outgoing.derivative];
-                            batchBtGrad{i}(edgeOrder) = batchBtGrad{i}(edgeOrder) - ...
-                                derivatives * errors(i) * weight;
+                            
+                            currentBetas = (arrayfun(@(e) e.Beta, edges))';
+
+                            regul = derivatives * errors(i) * weight + currentBetas * Lambda;
+
+                            batchBtGrad{i}(edgeOrder) = batchBtGrad{i}(edgeOrder) - regul;
                         end
                     end
                 end
