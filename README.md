@@ -1,7 +1,5 @@
-# My Graph Lib -- little pack for my researches
-There is a small pack for graph-base model with universal core function inside
-Pack includes model shell by my own and optimization machine for set-up model's coeff by training and test data
-Optimization machine general matter is modify Adam optimizator for graph-base model
+# Библиотека для графовой модели
+
 
 General language is MATLAB .m classes by inner OOP
 
