@@ -151,11 +151,6 @@ classdef Trainer < handle
                 obj.Compute_V5(XDataTrain, YDataTrain, ...
                     Beta1, Beta2, Eps, NodeWeight, NodeSize, ClipUp, ClipDown, Lambda, Lambda_Agg, targetNodeIndices);
 
-
-                % % Обучение на обучающей выборке
-                % obj.Compute_V3(XDataTrain, YDataTrain, ...
-                %     Beta1, Beta2, Eps, NodeWeight, NodeSize, ClipUp, ClipDown, Lambda);
-
                 % Расчет ошибки на обучающей выборке
                 trainEerror = obj.CalculateError(XDataTrain, YDataTrain, targetNodeIndices, errorMetric);
                 obj.trainErrors(end+1) = trainEerror;
