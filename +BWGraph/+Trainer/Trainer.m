@@ -148,7 +148,7 @@ classdef Trainer < handle
                 epochStart = tic;
 
                 % Обучение на обучающей выборке
-                obj.Compute_V4(XDataTrain, YDataTrain, ...
+                obj.Compute_V5(XDataTrain, YDataTrain, ...
                     Beta1, Beta2, Eps, NodeWeight, NodeSize, ClipUp, ClipDown, Lambda, Lambda_Agg, targetNodeIndices);
 
 
@@ -810,6 +810,9 @@ classdef Trainer < handle
                     targetErrors = errors(targetWhiteIndices);
                     meanTargetError = mean(targetErrors);
 
+                    % Добавление усредненной ошибки к белым вершинам
+                    errors(obj.whiteNodeIndices) = errors(obj.whiteNodeIndices) + lambda_Agg * meanTargetError;
+
                     % Распространение ошибок для черных вершин
                     if ~isempty(obj.blackNodeIndices)
                         maxIter = 10;
@@ -856,8 +859,7 @@ classdef Trainer < handle
                         end
                     end
 
-                    % Добавление усредненной ошибки к белым вершинам
-                    errors = errors + lambda_Agg * meanTargetError;
+
 
                     % Предварительное вычисление производных
                     alphaDerivativesCache = cell(numNodes, 1);
@@ -895,7 +897,7 @@ classdef Trainer < handle
                             edgeIndices = [betaDerivs.outgoing.edge];
                             [~, edgeOrder] = ismember(edgeIndices, edges);
                             derivatives = [betaDerivs.outgoing.derivative];
-                            
+
                             currentBetas = (arrayfun(@(e) e.Beta, edges))';
 
                             regul = derivatives * errors(i) * weight + currentBetas * Lambda;
@@ -947,6 +949,261 @@ classdef Trainer < handle
                 end
             end
         end
+
+        function Compute_V5(obj, XData, YData, Beta1, Beta2, Eps, NodesWeights, NodesLRScale, ClipUp, ClipDown, Lambda, lambda_Agg, targetWhiteIndices)
+            arguments
+                obj                 BWGraph.Trainer.Trainer,
+                XData
+                YData
+                Beta1               {mustBePositive, mustBeFinite},
+                Beta2               {mustBePositive, mustBeFinite},
+                Eps                 {mustBePositive, mustBeFinite},
+                NodesWeights        (1,:)      % Веса вершин для степени настройки параметров
+                NodesLRScale       (1,:)      % Масштабирование LR для вершин
+                ClipUp             {mustBeFinite},
+                ClipDown           {mustBeFinite},
+                Lambda             {mustBePositive},
+                lambda_Agg         {mustBeNonnegative}, % Коэффициент влияния усредненной ошибки
+                targetWhiteIndices (1,:)      % Индексы целевых белых вершин
+            end
+
+            % --- Инициализация параметров ---
+            beta1 = Beta1;
+            beta2 = Beta2;
+            epsilon = Eps;
+            nodes = obj.graph.ListOfNodes;
+            numNodes = numel(nodes);
+
+            % Инициализация кешей
+            if isempty(obj.whiteNodeIndices) || isempty(obj.blackNodeIndices)
+                obj.whiteNodeIndices = obj.graph.GetWhiteNodesIndices();
+                obj.blackNodeIndices = obj.graph.GetBlackNodesIndices();
+            end
+
+            if isempty(obj.incomingEdgesCache) || isempty(obj.outgoingEdgesCache) || isempty(obj.incomingNeighborsCache)
+                obj.incomingEdgesCache = cell(numNodes, 1);
+                obj.outgoingEdgesCache = cell(numNodes, 1);
+                obj.incomingNeighborsCache = cell(numNodes, 1);
+
+                for i = 1:numNodes
+                    obj.incomingEdgesCache{i} = obj.graph.getIncomingEdges(nodes(i));
+                    obj.outgoingEdgesCache{i} = nodes(i).getOutEdges();
+                    obj.incomingNeighborsCache{i} = obj.graph.getIncomingNeighbors(nodes(i));
+                end
+            end
+
+            % Инициализация моментов ADAM
+            if isempty(obj.mAl)
+                obj.mAl = cell(numNodes, 1);
+                obj.vAl = cell(numNodes, 1);
+                obj.mBt = cell(numNodes, 1);
+                obj.vBt = cell(numNodes, 1);
+                numEdgesPerNode = cellfun(@numel, obj.outgoingEdgesCache);
+                for i = 1:numNodes
+                    obj.mAl{i} = zeros(1, numEdgesPerNode(i));
+                    obj.vAl{i} = zeros(1, numEdgesPerNode(i));
+                    obj.mBt{i} = zeros(1, numEdgesPerNode(i));
+                    obj.vBt{i} = zeros(1, numEdgesPerNode(i));
+                end
+                obj.t = 0;
+            end
+
+            % --- Пакетная обработка ---
+            numSamples = length(XData);
+            numBatches = ceil(numSamples / obj.BatchSize);
+
+            for batchIdx = 1:numBatches
+                obj.t = obj.t + 1;
+                batchStart = (batchIdx-1)*obj.BatchSize + 1;
+                batchEnd = min(batchIdx*obj.BatchSize, numSamples);
+                batchIndices = batchStart:batchEnd;
+                numInBatch = length(batchIndices);
+
+                % Инициализация градиентов для всего батча
+                batchAlGrad = cell(numNodes, 1);
+                batchBtGrad = cell(numNodes, 1);
+                for i = 1:numNodes
+                    numEdges = numel(obj.outgoingEdgesCache{i});
+                    batchAlGrad{i} = zeros(1, numEdges);
+                    batchBtGrad{i} = zeros(1, numEdges);
+                end
+
+                % --- Обработка примеров в батче ---
+                for k = 1:numInBatch
+                    sampleIdx = batchIndices(k);
+                    xMatrix = XData(sampleIdx);
+                    yMatrix = YData(sampleIdx);
+
+                    % Прямой проход
+                    obj.graph.Forward(xMatrix);
+                    modelValues = obj.graph.GetModelResults();
+                    targetValues = yMatrix.getRow(1);
+
+                    % Вычисление ошибок для белых вершин
+                    errors = zeros(1, numNodes);
+                    errors(obj.whiteNodeIndices) = modelValues(obj.whiteNodeIndices) - targetValues;
+
+                    % Расчет усредненной ошибки для целевых белых вершин
+                    targetErrors = errors(targetWhiteIndices);
+                    meanTargetError = mean(targetErrors);
+
+                    % Добавление усредненной ошибки к белым вершинам
+                    errors(obj.whiteNodeIndices) = errors(obj.whiteNodeIndices) + lambda_Agg * meanTargetError;
+
+                    % Распространение ошибок для всех вершин (включая черные)
+                    maxIter = 10;
+                    for iter = 1:maxIter
+                        prevErrors = errors;
+
+                        % Обновление ошибок для всех вершин
+                        for i = 1:numNodes
+                            incomingEdges = obj.incomingEdgesCache{i};
+                            outgoingEdges = obj.outgoingEdgesCache{i};
+
+                            % Пропускаем белые вершины (их ошибки уже вычислены)
+                            if ismember(i, obj.whiteNodeIndices)
+                                continue;
+                            end
+
+                            errorFromIncoming = 0;
+                            errorFromOutgoing = 0;
+
+                            % Взвешенная сумма от входящих соседей
+                            if ~isempty(incomingEdges)
+                                for e = incomingEdges
+                                    u = e.SourceNode;
+                                    uIdx = find(nodes == u, 1);
+                                    alpha_e = e.Alfa;
+                                    errorFromIncoming = errorFromIncoming + alpha_e * errors(uIdx);
+                                end
+                            end
+
+                            % Взвешенная сумма от исходящих соседей
+                            if ~isempty(outgoingEdges)
+                                for e = outgoingEdges
+                                    v = e.TargetNode;
+                                    vIdx = find(nodes == v, 1);
+                                    sumAlphaOutV = sum(arrayfun(@(x) x.Alfa, obj.outgoingEdgesCache{vIdx}));
+                                    alpha_e = e.Alfa;
+                                    errorFromOutgoing = errorFromOutgoing + (alpha_e * errors(vIdx)) / (sumAlphaOutV + 1);
+                                end
+                            end
+
+                            % Итоговая ошибка для вершины
+                            sumAlphaOut = sum(arrayfun(@(e) e.Alfa, outgoingEdges));
+                            errors(i) = (errorFromIncoming + errorFromOutgoing) / (sumAlphaOut + 1);
+                        end
+
+                        % Проверка сходимости
+                        if max(abs(errors - prevErrors)) < 1e-6
+                            break;
+                        end
+                    end
+
+                    % % Предварительное вычисление производных для всех вершин
+                    % alphaDerivativesCache = cell(numNodes, 1);
+                    % betaDerivativesCache = cell(numNodes, 1);
+                    % for i = 1:numNodes
+                    %     if errors(i) == 0, continue; end
+                    %     alphaDerivativesCache{i} = obj.graph.computeAlphaDerivatives(i);
+                    %     betaDerivativesCache{i} = obj.graph.computeBetaDerivatives(i);
+                    % end
+
+                    % Вычисление градиентов с учетом входящих и исходящих ребер
+                    for i = 1:numNodes
+                        if errors(i) == 0, continue; end
+
+                        currentNode = nodes(i);
+                        edges = obj.outgoingEdgesCache{i};
+                        weight = NodesWeights(i);
+
+                        % Градиенты для исходящих ребер (alpha и beta)
+                        for j = 1:numel(edges)
+                            edge = edges(j);
+
+                            % Производные для исходящих ребер
+                            dF_dalpha_out = obj.graph.computeOutgoingAlphaDerivative(i, edge);
+                            dF_dbeta_out = obj.graph.computeOutgoingBetaDerivative(i, edge);
+
+                            % Обновление градиентов с регуляризацией
+                            batchAlGrad{i}(j) = batchAlGrad{i}(j) - dF_dalpha_out * errors(i) * weight + Lambda * edge.Alfa;
+                            batchBtGrad{i}(j) = batchBtGrad{i}(j) - dF_dbeta_out * errors(i) * weight + Lambda * edge.Beta;
+                        end
+
+                        % Градиенты для входящих ребер (alpha и beta)
+                        incomingEdges = obj.incomingEdgesCache{i};
+                        for j = 1:numel(incomingEdges)
+                            edge = incomingEdges(j);
+                            sourceNode = edge.SourceNode;
+                            sourceIdx = find(nodes == sourceNode, 1);
+
+                            if isempty(sourceIdx), continue; end
+
+                            % Производные для входящих ребер
+                            dF_dalpha_in = obj.graph.computeIncomingAlphaDerivative(i, edge);
+                            dF_dbeta_in = obj.graph.computeIncomingBetaDerivative(i, edge);
+
+                            if ~isnan(dF_dalpha_in)
+                                % Находим позицию этого ребра в исходящих ребрах sourceNode
+                                sourceEdges = obj.outgoingEdgesCache{sourceIdx};
+                                edgePos = find(sourceEdges == edge, 1);
+
+                                if ~isempty(edgePos)
+                                    % Обновление градиентов с регуляризацией
+                                    batchAlGrad{sourceIdx}(edgePos) = batchAlGrad{sourceIdx}(edgePos) - ...
+                                        dF_dalpha_in * errors(i) * NodesWeights(sourceIdx) + Lambda * edge.Alfa;
+
+                                    batchBtGrad{sourceIdx}(edgePos) = batchBtGrad{sourceIdx}(edgePos) - ...
+                                        dF_dbeta_in * errors(i) * NodesWeights(sourceIdx) + Lambda * edge.Beta;
+                                end
+                            end
+                        end
+                    end
+                end
+
+                % --- Нормализация и обрезка градиентов ---
+                invNumInBatch = 1 / numInBatch;
+                for i = 1:numNodes
+                    if ~isempty(batchAlGrad{i})
+                        batchAlGrad{i} = min(max(batchAlGrad{i} * invNumInBatch, ClipDown), ClipUp);
+                    end
+                    if ~isempty(batchBtGrad{i})
+                        batchBtGrad{i} = min(max(batchBtGrad{i} * invNumInBatch, ClipDown), ClipUp);
+                    end
+                end
+
+                % --- Обновление параметров с помощью ADAM ---
+                beta1_t = beta1^obj.t;
+                beta2_t = beta2^obj.t;
+                mCorrFactor = 1 / (1 - beta1_t);
+                vCorrFactor = 1 / (1 - beta2_t);
+
+                for i = 1:numNodes
+                    edges = obj.outgoingEdgesCache{i};
+                    if isempty(edges), continue; end
+
+                    % Обновление моментов
+                    obj.mAl{i} = beta1 * obj.mAl{i} + (1-beta1) * batchAlGrad{i};
+                    obj.vAl{i} = beta2 * obj.vAl{i} + (1-beta2) * (batchAlGrad{i}.^2);
+                    obj.mBt{i} = beta1 * obj.mBt{i} + (1-beta1) * batchBtGrad{i};
+                    obj.vBt{i} = beta2 * obj.vBt{i} + (1-beta2) * (batchBtGrad{i}.^2);
+
+                    % Применение обновлений
+                    lr = obj.learningRate * NodesLRScale(i);
+                    sqrtVAl = sqrt(obj.vAl{i} * vCorrFactor) + epsilon;
+                    sqrtVBt = sqrt(obj.vBt{i} * vCorrFactor) + epsilon;
+
+                    alfaUpdates = lr * (obj.mAl{i} * mCorrFactor) ./ sqrtVAl;
+                    betaUpdates = lr * (obj.mBt{i} * mCorrFactor) ./ sqrtVBt;
+
+                    for j = 1:numel(edges)
+                        edges(j).Alfa = edges(j).Alfa + alfaUpdates(j);
+                        edges(j).Beta = edges(j).Beta + betaUpdates(j);
+                    end
+                end
+            end
+        end
+
     end
 end
 

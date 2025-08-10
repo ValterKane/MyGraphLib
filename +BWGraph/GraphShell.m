@@ -349,6 +349,183 @@ classdef GraphShell < handle
             % Under construction
         end
 
+        function derivative = computeIncomingAlphaDerivative(obj, nodeIndex, edge, visitedNodes, derivativeCache)
+            % Вычисляет производную dF/dalpha для входящего ребра edge в вершине nodeIndex
+            % Формула: (F_u + alpha_e * dF_u/dalpha_e) / (sum_alpha_out + 1)
+
+            % Инициализация при первом вызове
+            if nargin < 4
+                visitedNodes = [];
+                derivativeCache = containers.Map('KeyType', 'double', 'ValueType', 'any');
+            end
+
+            % Проверка кэша
+            cacheKey = nodeIndex * 1000 + edge.SourceNode.ID;
+            if derivativeCache.isKey(cacheKey)
+                derivative = derivativeCache(cacheKey);
+                return;
+            end
+
+            % Проверка на цикл
+            if ismember(nodeIndex, visitedNodes)
+                derivative = NaN;
+                return;
+            end
+
+            % Добавляем текущую вершину в посещённые
+            visitedNodes = [visitedNodes, nodeIndex];
+
+            currentNode = obj.ListOfNodes(nodeIndex);
+            sourceNode = edge.SourceNode;
+            sourceNodeIndex = find(obj.ListOfNodes == sourceNode, 1);
+
+            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            outgoingEdges = currentNode.getOutEdges();
+            sum_alpha_out = sum([outgoingEdges.Alfa]);
+
+            % Рекурсивно вычисляем dF_u/dalpha_e для вершины-источника
+            dF_u_dalpha = obj.computeIncomingAlphaDerivative(sourceNodeIndex, edge, visitedNodes, derivativeCache);
+
+            % Если производная не вычислима (например, из-за цикла), возвращаем NaN
+            if isnan(dF_u_dalpha)
+                derivative = NaN;
+                return;
+            end
+
+            % Вычисляем F_u (значение функции в вершине-источнике)
+            F_u = sourceNode.getFResult();
+
+            % Применяем формулу
+            derivative = (F_u + edge.Alfa * dF_u_dalpha) / (sum_alpha_out + 1);
+
+            % Кэшируем результат
+            derivativeCache(cacheKey) = derivative;
+        end
+
+        function derivative = computeIncomingBetaDerivative(obj, nodeIndex, edge, visitedNodes, derivativeCache)
+            % Вычисляет производную dF/dbeta для входящего ребра edge в вершине nodeIndex
+            % Формула: (2 + alpha_e * dF_u/dbeta_e) / (sum_alpha_out + 1)
+
+            % Инициализация при первом вызове
+            if nargin < 4
+                visitedNodes = [];
+                derivativeCache = containers.Map('KeyType', 'double', 'ValueType', 'any');
+            end
+
+            % Проверка кэша
+            cacheKey = nodeIndex * 1000 + edge.SourceNode.ID;
+            if derivativeCache.isKey(cacheKey)
+                derivative = derivativeCache(cacheKey);
+                return;
+            end
+
+            % Проверка на цикл
+            if ismember(nodeIndex, visitedNodes)
+                derivative = NaN;
+                return;
+            end
+
+            % Добавляем текущую вершину в посещённые
+            visitedNodes = [visitedNodes, nodeIndex];
+
+            currentNode = obj.ListOfNodes(nodeIndex);
+            sourceNode = edge.SourceNode;
+            sourceNodeIndex = find(obj.ListOfNodes == sourceNode, 1);
+
+            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            outgoingEdges = currentNode.getOutEdges();
+            sum_alpha_out = sum([outgoingEdges.Alfa]);
+
+            % Рекурсивно вычисляем dF_u/dbeta_e для вершины-источника
+            dF_u_dbeta = obj.computeIncomingBetaDerivative(sourceNodeIndex, edge, visitedNodes, derivativeCache);
+
+            % Если производная не вычислима (например, из-за цикла), возвращаем NaN
+            if isnan(dF_u_dbeta)
+                derivative = NaN;
+                return;
+            end
+
+            % Применяем формулу
+            derivative = (2 + edge.Alfa * dF_u_dbeta) / (sum_alpha_out + 1);
+
+            % Кэшируем результат
+            derivativeCache(cacheKey) = derivative;
+        end
+
+        function derivative = computeOutgoingAlphaDerivative(obj, nodeIndex, edge)
+            % Вычисляет производную dF/dalpha для исходящего ребра edge из вершины nodeIndex
+            % Формула: -F_vi / (sum_alpha_out + 1)
+
+            currentNode = obj.ListOfNodes(nodeIndex);
+
+            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            outgoingEdges = currentNode.getOutEdges();
+            sum_alpha_out = sum([outgoingEdges.Alfa]);
+
+            % F_vi (значение функции в текущей вершине)
+            F_vi = currentNode.getFResult();
+
+            % Применяем формулу
+            derivative = -F_vi / (sum_alpha_out + 1);
+        end
+
+        function derivative = computeOutgoingBetaDerivative(obj, nodeIndex, edge)
+            % Вычисляет производную dF/dbeta для исходящего ребра edge из вершины nodeIndex
+            % Формула: -1 / (sum_alpha_out + 1)
+
+            currentNode = obj.ListOfNodes(nodeIndex);
+
+            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            outgoingEdges = currentNode.getOutEdges();
+            sum_alpha_out = sum([outgoingEdges.Alfa]);
+
+            % Применяем формулу
+            derivative = -1 / (sum_alpha_out + 1);
+        end
+
+        function [dF_dalpha, dF_dbeta] = computeAllEdgeDerivatives(obj)
+            % Вычисляет все производные для всех рёбер графа
+            % Выход:
+            %   dF_dalpha - массив структур с производными по alpha для всех рёбер
+            %   dF_dbeta - массив структур с производными по beta для всех рёбер
+
+            numNodes = numel(obj.ListOfNodes);
+            dF_dalpha = cell(numNodes, 1);
+            dF_dbeta = cell(numNodes, 1);
+
+            for i = 1:numNodes
+                currentNode = obj.ListOfNodes(i);
+
+                % Инициализация структур для хранения производных
+                dF_dalpha{i} = struct('edge', {}, 'derivative', {});
+                dF_dbeta{i} = struct('edge', {}, 'derivative', {});
+
+                % Обработка входящих рёбер
+                incomingEdges = obj.getIncomingEdges(currentNode);
+                for j = 1:numel(incomingEdges)
+                    edge = incomingEdges(j);
+                    dAlpha = obj.computeIncomingAlphaDerivative(i, edge);
+                    dBeta = obj.computeIncomingBetaDerivative(i, edge);
+
+                    dF_dalpha{i}(end+1) = struct('edge', edge, 'derivative', dAlpha);
+                    dF_dbeta{i}(end+1) = struct('edge', edge, 'derivative', dBeta);
+                end
+
+                % Обработка исходящих рёбер
+                outgoingEdges = currentNode.getOutEdges();
+                for j = 1:numel(outgoingEdges)
+                    edge = outgoingEdges(j);
+                    dAlpha = obj.computeOutgoingAlphaDerivative(i, edge);
+                    dBeta = obj.computeOutgoingBetaDerivative(i, edge);
+
+                    dF_dalpha{i}(end+1) = struct('edge', edge, 'derivative', dAlpha);
+                    dF_dbeta{i}(end+1) = struct('edge', edge, 'derivative', dBeta);
+                end
+            end
+        end
+
+
+
 
         function derivatives = computeAlphaDerivatives(obj, nodeIndex, visitedNodes, derivativeCache)
             % Инициализация при первом вызове
@@ -476,7 +653,6 @@ classdef GraphShell < handle
             % Кэшируем результаты
             derivativeCache(nodeIndex) = derivatives;
         end
-
 
         function [dF_dalpha, dF_dbeta] = computeAllDerivatives(obj)
             % Вычисляет все производные для всех вершин графа
