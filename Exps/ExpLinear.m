@@ -15,22 +15,18 @@ betaGen = BetaGenerator(2);
 
 nodeA = Node(1, 100, "White", CoreF);
 nodeB = Node(2, 100, "Black", []);
-% nodeC = Node(3, 100, "Black", []);
-% nodeD = Node(4, 100, "Black", []);
-% nodeE = Node(5, 100, "Black", []);
+nodeC = Node(3, 100, "Black", []);
 
-% nodeA.addEdge(nodeC);
+nodeA.addEdge(nodeC);
 nodeA.addEdge(nodeB);
 nodeB.addEdge(nodeB);
-% nodeA.addEdge(nodeD);
-% nodeA.addEdge(nodeE);
 
 % Индивидуальные параметры для вершин (общие для всех экспериментов)
 NodeSize = [1.5 0.5 0.5 0.5 0.5]; % Коэффициенты 
 NodeWeight = [1.5 0.5 0.5 0.5 0.5]; % Весовые коэффициенты вершин
 
 % Создаем графовую модель
-modelShell = GraphShell(alfaGen, betaGen, nodeA, nodeB);
+modelShell = GraphShell(alfaGen, betaGen, nodeA, nodeB, nodeC);
 
 %% Создаем входные данные
 % Генерация данных с учетом индивидуальных характеристик вершин

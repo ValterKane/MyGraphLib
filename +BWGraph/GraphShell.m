@@ -525,8 +525,6 @@ classdef GraphShell < handle
         end
 
 
-
-
         function derivatives = computeAlphaDerivatives(obj, nodeIndex, visitedNodes, derivativeCache)
             % Инициализация при первом вызове
             if nargin < 3
@@ -669,7 +667,6 @@ classdef GraphShell < handle
                 dF_dbeta{i} = obj.computeBetaDerivatives(i);
             end
         end
-
 
         function DrawGraph(obj, titleStr)
             % Метод для визуализации структуры графа
