@@ -1,3 +1,4 @@
+% Пример сигмоидальной функции
 classdef SigmoidFunction < coreFunctions.ICoreF
     
     methods (Static)

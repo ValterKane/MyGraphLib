@@ -1,3 +1,4 @@
+% Функция численного решения задачи нестационарного теплообмена в пластине
 classdef PlateHeatingModel < coreFunctions.ICoreF
     properties
         L;          % Толщина пластины [м]

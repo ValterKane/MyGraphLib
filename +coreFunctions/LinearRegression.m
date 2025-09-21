@@ -1,9 +1,10 @@
+% Функция линейной регрессии
 classdef LinearRegression < coreFunctions.ICoreF
     
     properties (Access = private)
         Num_of_Params = 0;
     end
-
+ 
     methods (Static)
         function obj = createFromData(data)
             % Фабричный метод для создания экземпляра при загрузке

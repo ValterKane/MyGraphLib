@@ -1,3 +1,4 @@
+% Пример простой линейной функции
 classdef LinearFunction < coreFunctions.ICoreF
     
     methods (Static)

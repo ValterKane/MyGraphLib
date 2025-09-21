@@ -1,3 +1,4 @@
+% Пример простой суммирующей функции
 classdef SimpleAddingCoreFunction < coreFunctions.ICoreF
   
     properties (Access = private)
