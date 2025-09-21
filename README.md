@@ -1,4 +1,8 @@
 # Экспериментальная библиотека для модели черно-белого графа (v.0.2)
+## Содержание
+- [Структура проекта](#структура-проекта)
+- [Пример использования](#пример-использования)
+- [Спецификация основных методов](#спецификация-основных-методов)
 ## Структура проекта:
 ```
     MyGraphLib
@@ -22,57 +26,65 @@
     │           Trainer.m                   # Класс, контролирующий настройку модели
     │
     ├───+coreFunctions                      # Пространство имен, содержащие пример ядровых функций и интерфейс для них
-    │       HeatTransferBC.m                # Пример ядровой функции на основе уравнения теплового баланса
     │       ICoreF.m                        # Интерфейс ядровых функций, имплементация которого обязательна для всех будущих ядровых функций
-    │       LinearFunction.m                # Пример простой линейной функции ядра
-    │       LinearRegression.m              # Пример регрессионной функции ядра
-    │       SigmoidFunction.m               # Пример сигмоидальной функции ядра
-    └───    SimpleAddingCoreFunction.m      # Пример суммирующей функции ядра
+    │       ...
+    └───    LinearFunction.m                # Пример простой линейной функции ядра
   
 ```
 ## Пример использования
+### Импортируем пространства имен
 ```matlab
-%% Генерация данных
 import BWGraph.*;
 import BWGraph.CustomMatrix.*;
 import BWGraph.RandomGenerator.*;
 import BWGraph.Trainer.*;
 import coreFunctions.*;
-
-rng(2);
-% Общая функция для всех вершин
+```
+### Создаем функции ядра и вершины графа
+```matlab
+rng(123);
 CoreF = LinearFunction();
+
 alfaGen = AlphaGenerator(0.9);
-betaGen = BetaGenerator(1);
+betaGen = BetaGenerator(2);
 
-nodeA = Node(1, 30, "White", CoreF);
-nodeB = Node(2, 30, "Black", []);
-nodeC = Node(3, 30, "Black", []);
-nodeD = Node(4, 30, "Black", []);
+nodeA = Node(1, 100, "White", CoreF);
+nodeB = Node(2, 100, "Black", []);
+nodeC = Node(3, 100, "Black", []);
 
-nodeA.addEdge(nodeB);
 nodeA.addEdge(nodeC);
-nodeA.addEdge(nodeD);
-
-% Индивидуальные параметры для вершин (общие для всех экспериментов)
-NodeSize = [1 1 1 1]; % Коэффициенты 
-NodeWeight = [1 1 1 1]; % Весовые коэффициенты вершин
-
-% Создаем графовую модель
-modelShell = GraphShell(alfaGen, betaGen,  nodeA, nodeB, nodeC, nodeD);
-
-% Создаем входные данные
-% Генерация данных с учетом индивидуальных характеристик вершин
+nodeA.addEdge(nodeB);
+nodeB.addEdge(nodeB);
+```
+### Задаем индивидуальные параметры для вершин
+```matlab
+NodeSize = [1.5 0.5 0.5]; % Коэффициенты 
+NodeWeight = [1.5 0.5 0.5]; % Весовые коэффициенты вершин
+```
+### Создаем черно-белый граф
+```matlab
+modelShell = GraphShell(alfaGen, betaGen, nodeA, nodeB, nodeC);
+```
+### Выполняем генерацию данных
+#### Инициализация BWMatrix
+```matlab
+% Задаем количество синтетических данных
 numSamples = 500;
+% Считываем количество вершин в графе
 numOfNodes = numel(modelShell.ListOfNodes);
-numOfWhiteNodes = modelShell.GetNumOfWhiteNode; % Получаем количество вершин
-numInputParams = CoreF.GetNumOfInputParams(); % Получаем количество входных параметров
+% Получаем количество белых вершин
+numOfWhiteNodes = modelShell.GetNumOfWhiteNode;
+% Получаем количество входных параметров ядровой функции
+numInputParams = CoreF.GetNumOfInputParams();
+% Создаем объекты BWMatrix для входных (XData) и выходных (YData) подмножеств
 XData = repmat(BWMatrix(), numSamples, 1);
 YData = repmat(BWMatrix(), numSamples, 1);
-
+```
+#### Генерация синтетических данных
+```matlab
 for i = 1:numSamples 
     xM = zeros(numInputParams,1);
-    x = randi([-10,10]);
+    x = randi([1,100]);
     for j = 1:numOfNodes
         for k = 1:numInputParams
             xM(k) = x;
@@ -84,71 +96,48 @@ end
 for i = 1:numSamples
     yM = zeros(1,numOfWhiteNodes);
     for j = 1:numOfWhiteNodes
-         yM(j) = 10*XData(i).getRow(j) - 50;
+         yM(j) = 10*XData(i).getRow(j) - 51;
     end
     YData(i) = YData(i).addRow(yM);
 end
-
-% Делим выборку на подвыборки 80(обуч)% / 20(тест)%
+```
+#### Делим исходные данные на обучающее и тестовое подмножества
+```matlab
+% Создаем индикатор из случайных значений
 indices = randperm(numSamples);
+% Создаем разделитель
 splitPoint = round(0.8 * numSamples);
+% Извлекаем индексы для обучения и тестирования
 trainIndices = indices(1:splitPoint);
 testIndices = indices(splitPoint+1:end);
 
-% Определим обучающую и тестовую выборку
+% Отделяем обучающую и тестовую выборку
 XDataTrain = XData(trainIndices);
 YDataTrain = YData(trainIndices);
 XDataTest = XData(testIndices);
 YDataTest = YData(testIndices);
-
-%% Строим диаграммы распределения (опционально)
-% Данные для диаграммы
-trainCount = length(trainIndices);
-testCount = length(testIndices);
-sizes = [trainCount, testCount];
-
-% Подписи с количеством данных
-labels = {
-    sprintf('Обучающая (%d)', trainCount), ...
-    sprintf('Тестовая (%d)', testCount)
-};
-
-% Создаем фигуру и настраиваем шрифт
-figure;
-set(gcf, 'DefaultTextFontName', 'Times New Roman');
-set(gcf, 'DefaultAxesFontName', 'Times New Roman');
-set(gcf, 'DefaultAxesFontSize', 14);
-
-% Круговая диаграмма с выделением обучающей выборки
-explode = [1 0]; % Выделяем обучающую выборку
-h = pie(sizes, explode, labels);
-
-% Устанавливаем красно-синюю цветовую схему
-colors = [0.7 0.1 0.1; 0.1 0.3 0.7]; % [красный; синий]
-colormap(colors);
-
-% Настраиваем заголовок с увеличенным шрифтом
-title(sprintf('Разбиение данных: %d (обуч) / %d (тест)', trainCount, testCount), ...
-      'FontSize', 14, 'FontWeight', 'bold');
-
-legend(labels, 'Location', 'best', 'FontSize', 12);
-
-%% Отрисовка структуры графа
+```
+### (Опционально) Отображаем полученный граф
+```matlab
 modelShell.DrawGraph("Структура модели до настройки");
-
-%% Настройка модели
-% Задаем настройщик
+```
+### Создаем настройщик для модели
+```matlab
 trainer = Trainer(modelShell, 30);
-% Вызываем настройщик
-trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest, 0.1, 0.1, 0.1, 1e-8, NodeSize, NodeWeight, 200, 1e12, -1e12, 1.0, 1.0);
-
-%% Тестирование модели
-
+```
+### Запускаем процесс настройки модели
+```matlab
+trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest, 0.1, 0.9, 0.99, 1e-8, NodeSize, NodeWeight, 1000, 1e7, -1e7, 10.0, 0.1, 0, [], 'mae');
+```
+### Тестируем модель после настройки
+```matlab
+% Получаем индексы белых вершин
 whiteIdx = modelShell.GetWhiteNodesIndices;
+% Создаем хранилища для предсказанных значений и фактических значений
 numTestSamples = numel(YDataTest);
 actualValue = zeros(1, numTestSamples);
 predictionValue = zeros(1, numTestSamples);
-
+% Подаем тестовые данные в модель и снимаем результат
 for j = 1 : numTestSamples
     modelShell.Forward(XDataTest(j));
     actual = YDataTest(j).getRow(1);
@@ -156,11 +145,17 @@ for j = 1 : numTestSamples
     predictionValue(j) = mean(predict(whiteIdx));
     actualValue(j) = mean(actual);
 end
-
+```
+### (Опционально) Строим график сравнения
+```matlab
 % Строим график сравнения
-figure;
+figure(...
+    'Name', 'Тестирование', ...
+    'Position', [10, 10, 900, 500], ...
+    'Color', [0.95, 0.95, 0.95], ...
+    'Resize', 'off' ...
+);
 hold on;
-grid on;
 
 % Рисуем линии фактических и модельных значений
 plot(1:numTestSamples, actualValue, 'b-o', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Фактические значения');
@@ -169,75 +164,108 @@ plot(1:numTestSamples, predictionValue, 'r--s', 'LineWidth', 2, 'MarkerSize', 6,
 % Настраиваем график
 xlabel('Номер тестового примера');
 ylabel('Значение');
-title('Сравнение модельных и фактических значений на тестовой выборке');
+title('Апробация модели на тестовом подмножестве');
 legend('show', 'Location', 'best');
 
-% Добавляем линию нуля (если нужно)
-% line([1 numTestSamples], [0 0], 'Color', 'k', 'LineStyle', '--');
+set(gca, 'FontSize', 14, 'FontWeight', 'bold');
 
-hold off;
-%% Валидация
-rng(123)
-validSamples = 50;
-XDataValid = repmat(BWMatrix(), validSamples, 1);
-YDataValid = repmat(BWMatrix(), validSamples, 1);
-
-for i = 1:validSamples 
-    xM = zeros(numInputParams,1);
-    for j = 1:numOfNodes
-        for k = 1:numInputParams
-            xM(k) = randi([20,30]);
-        end
-        XDataValid(i) = XDataValid(i).addRow(xM);
-    end 
-end
-
-for i = 1:validSamples
-    yM = zeros(1,numOfWhiteNodes);
-    for j = 1:numOfWhiteNodes
-         yM(j) = 10*XDataValid(i).getRow(j)-50;
-    end
-    YDataValid(i) = YDataValid(i).addRow(yM);
-end
-
-validValue = zeros(1,validSamples);
-predictOnValid = zeros(1,validSamples);
-
-for j = 1:validSamples
-    modelShell.Forward(XDataValid(j));
-    forecast = modelShell.GetModelResults();
-    actual = YDataValid(j).getRow(1);
-    validValue(j) = mean(actual);
-    predictOnValid(j) = mean(forecast(whiteIdx));
-end
-
-% Строим график сравнения
-figure;
-hold on;
 grid on;
-
-% Рисуем линии фактических и модельных значений
-plot(1:validSamples, validValue, 'b-o', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Фактические значения');
-plot(1:validSamples, predictOnValid, 'r-o', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Модельные значения');
-
-% Настраиваем график
-xlabel('Номер тестового примера');
-ylabel('Значение');
-title('Сравнение модельных и фактических значений на тестовой выборке');
-legend('show', 'Location', 'best');
-
-% Добавляем линию нуля (если нужно)
-% line([1 numTestSamples], [0 0], 'Color', 'k', 'LineStyle', '--');
-
 hold off;
-
-%% Анализ метрик
-fprintf('Результирующее MAE на валидации %2.3f\n', mae(predictOnValid,validValue))
-fprintf('Результирующее MAPE на валидации %2.3f\n', mape(validValue, predictOnValid))
-
-fprintf('Результирующее MAE на тесте %2.3f\n', mae(predictionValue,actualValue))
-fprintf('Результирующее MAPE на тесте %2.3f\n', mape(actualValue,predictionValue))
-
-%% Отобразить граф
-modelShell.DrawGraph("Структура модели после настройки");
 ```
+
+## Спецификация основных методов
+### Метод `Train`
+Обучает модель на предоставленных данных, используя адаптивный метод оптимизации
+Сигнатура:
+```matlab
+function Train(XDataTrain, YDataTrain, XDataTest, YDataTest, ...
+                LearningRate, Beta1, Beta2, Eps, NodeWeight, NodeSize, Epoches, ...
+                ClipUp, ClipDown, TargetError, Lambda, Lambda_Agg, targetNodeIndices, errorMetric)
+```
+Параметры:
+| Параметр | Тип | Описание |
+| :--- | :--- | :--- |
+| **`XDataTrain`** | `BWMatrix` | Обучающая выборка: входные данные. Должен быть массивом `BWGraph.CustomMatrix.BWMatrix`. |
+| **`YDataTrain`** | `BWMatrix` | Обучающая выборка: целевые значения. Должен быть массивом `BWGraph.CustomMatrix.BWMatrix`. Размерность должна соответствовать количеству белых узлов в графе. |
+| **`XDataTest`** | `BWMatrix` | Тестовая выборка: входные данные. Должен быть массивом `BWGraph.CustomMatrix.BWMatrix`. |
+| **`YDataTest`** | `BWMatrix` | Тестовая выборка: целевые значения. Должен быть массивом `BWGraph.CustomMatrix.BWMatrix`. Количество примеров должно совпадать с `XDataTest`. |
+| **`LearningRate`** | `double` | Начальная скорость обучения. Положительное конечное число > 0. Динамически уменьшается в процессе обучения. |
+| **`Beta1`** | `double` | Коэффициент экспоненциального затухания для первого момента (адаптация градиента). Положительное конечное число > 0. |
+| **`Beta2`** | `double` | Коэффициент экспоненциального затухания для второго момента (адаптация learning rate). Положительное конечное число > 0. |
+| **`Eps`** | `double` | Малое число для численной стабильности (предотвращение деления на ноль). Положительное конечное число > 0. |
+| **`NodeWeight`** | `double (1,:)` | Вектор весов для узлов графа. |
+| **`NodeSize`** | `double (1,:)` | Вектор размеров для узлов графа. |
+| **`Epoches`** | `integer` | Максимальное количество эпох обучения. Положительное целое число > 0. |
+| **`ClipUp`** | `double` | Верхняя граница для ограничения градиента (gradient clipping). Любое конечное число. |
+| **`ClipDown`** | `double` | Нижняя граница для ограничения градиента (gradient clipping). Любое конечное число. |
+| **`TargetError`** | `double` | Целевое значение ошибки. Обучение остановится, если ошибка станет меньше этого значения. Положительное конечное число > 0. |
+| **`Lambda`** | `double` | Коэффициент регуляризации. Строго положительное число > 0. |
+| **`Lambda_Agg`** | `double` | Коэффициент регуляризации для агрегирующих функций. Строго положительное число или ноль. |
+| **`targetNodeIndices`** | `double[]` | Индексы белых вершин, для которых рассчитывается ошибка. Если не указан, используются все белые вершины. **По умолчанию: `[]`**. Должны быть действительными индексами белых вершин графа. |
+| **`errorMetric`** | `string` | Метрика для расчета ошибки. **По умолчанию: `'mae'`**. Допустимые значения: `'mae'` (Mean Absolute Error), `'mape'` (Mean Absolute Percentage Error). |
+
+#### Возвращаемое значение
+
+Метод не возвращает явного значения. Результатом обучения являются обновленные веса модели, которые сохраняются внутри её структуры.
+
+#### Пример использования
+
+```matlab
+% Пример вызова метода Train
+model.Train(X_train, Y_train, X_test, Y_test, ...
+            0.001, 0.9, 0.999, 1e-8, nodeWeights, nodeSizes, 1000, ...
+            1.0, -1.0, 0.001, 0.01, 0.005, [], 'mae');
+```
+
+### Приватный метод `Compute_V5`
+Вызывается в теле метода `Train` и выполняет коррекцию весов пакеным градиентным спуском с использованием ADAM-оптимизатора
+Сигнатура:
+```matlab
+function Compute_V5(obj, XData, YData, Beta1, Beta2, Eps, NodesWeights, NodesLRScale, ClipUp, ClipDown, Lambda, lambda_Agg, targetWhiteIndices)
+```
+### Параметры
+
+| Параметр | Тип/Ограничения | Описание |
+| :--- | :--- | :--- |
+| **`obj`** | `BWGraph.Trainer.Trainer` | Экземпляр объекта Trainer, для которого вызывается метод. |
+| **`XData`** | - | Входные данные для вычислений. |
+| **`YData`** | - | Целевые значения (метки) для вычислений. |
+| **`Beta1`** | `double`<br/>`mustBePositive, mustBeFinite` | Коэффициент экспоненциального затухания для оценки первого момента (среднего) градиентов. |
+| **`Beta2`** | `double`<br/>`mustBePositive, mustBeFinite` | Коэффициент экспоненциального затухания для оценки второго момента (нецентрированной дисперсии) градиентов. |
+| **`Eps`** | `double`<br/>`mustBePositive, mustBeFinite` | Малое число для численной стабильности, предотвращающее деление на ноль. |
+| **`NodesWeights`** | `double (1,:)` | Вектор весов вершин. Используется для масштабирования степени настройки параметров отдельных вершин. |
+| **`NodesLRScale`** | `double (1,:)` | Вектор коэффициентов масштабирования скорости обучения (Learning Rate) для отдельных вершин. |
+| **`ClipUp`** | `double`<br/>`mustBeFinite` | Верхняя граница для ограничения (clipping) значений градиентов. |
+| **`ClipDown`** | `double`<br/>`mustBeFinite` | Нижняя граница для ограничения (clipping) значений градиентов. |
+| **`Lambda`** | `double`<br/>`mustBePositive` | Коэффициент регуляризации (L2-регуляризация или подобная). |
+| **`lambda_Agg`** | `double`<br/>`mustBeNonnegative` | Коэффициент влияния усредненной ошибки. Регуляризационный параметр для агрегирующих функций. |
+| **`targetWhiteIndices`** | `double (1,:)` | Вектор индексов целевых белых вершин, для которых рассчитывается ошибка и производные. |
+
+### Особенности реализации
+
+*   Метод использует **аргументные блоки (arguments block)** MATLAB для валидации входных параметров.
+*   Реализует механизм **ограничения градиентов (gradient clipping)** через параметры `ClipUp` и `ClipDown`.
+*   Поддерживает **адаптивную скорость обучения** для отдельных вершин через параметр `NodesLRScale`.
+*   Включает **два типа регуляризации**: основную (`Lambda`) и для агрегирующих функций (`lambda_Agg`).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
