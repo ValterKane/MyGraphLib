@@ -4,7 +4,7 @@ classdef Node < handle
         NodeType BWGraph.NodeColor                  % Цвет вершины
         NodeFunction                                % Функции вершин
         FResult double                              % Значение в вершине
-        
+        EdgeIndex = 1;
     end
 
     properties (Access = public)
@@ -53,8 +53,11 @@ classdef Node < handle
                 error('Ребро в эту вершину уже существует');
             end
 
-            newEdge = BWGraph.Edge(obj, targetNode, 1, 1);
+            edgeIndex = strcat(num2str(obj.ID), num2str(obj.EdgeIndex));
+            edgeIndex = str2double(edgeIndex);
+            newEdge = BWGraph.Edge(obj, targetNode, 1, 1,1,1, edgeIndex);
             obj.OutEdgesMap(targetNode) = newEdge;
+            obj.EdgeIndex = obj.EdgeIndex + 1;
         end
 
         function success = removeEdgeByTarget(obj, targetNode)
@@ -130,6 +133,8 @@ classdef Node < handle
         function func = getNodeFunction(obj)
             func = obj.NodeFunction;
         end
+
+        
         
     end
    

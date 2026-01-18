@@ -187,47 +187,92 @@ classdef GraphShell < handle
                 obj     BWGraph.GraphShell
                 Data    BWGraph.CustomMatrix.BWMatrix
             end
-            num_nods = numel(obj.ListOfNodes);
-            num_of_rows = Data.rowCount();
-            f_results = zeros(1,num_nods);
 
-            if num_of_rows ~= num_nods
+            num_nodes = numel(obj.ListOfNodes);
+            num_of_rows = Data.rowCount();
+
+            if num_of_rows ~= num_nodes
                 error('Входных значений должно быть столько же, сколько и вершин')
             end
 
-            for i = 1:num_nods
-                currentNode = obj.ListOfNodes(i);
-                edges = currentNode.getOutEdges();
-
-                G1 = 0;
-                G2 = 0;
-                G3 = 0;
-
-                for k = 1:numel(edges)
-                    edge = edges(k);
-                    G1 = G1 + edge.Beta;
-                    G2 = G2 + edge.Alfa;
-                end
-
-                allIncomingNeighbors = obj.getIncomingNeighbors(currentNode);
-
-                for k = 1:numel(allIncomingNeighbors)
-                    neighbor = allIncomingNeighbors(k);
-                    edgeToCurrentNode = neighbor.getEdgeToTarget(currentNode);
-                    G3 = G3 + (edgeToCurrentNode.Alfa * neighbor.getFResult() + edgeToCurrentNode.Beta);
-                end
-
+            % Предварительно вычисляем L_v для всех узлов
+            L_values = zeros(1, num_nodes);
+            for i = 1:num_nodes
                 currentData = Data.getRow(i);
-
-                obj.fi_result(i) = currentNode.calcNodeFunc(currentData);
-
-                f_results(i) = (obj.fi_result(i) + G3 - G1) / (G2+1);
-                obj.ListOfNodes(i).setFResult(f_results(i));
+                L_values(i) = obj.ListOfNodes(i).calcNodeFunc(currentData);
+                obj.fi_result(i) = L_values(i);
             end
 
-            % for i = 1:num_nods
-            %     obj.ListOfNodes(i).setFResult(f_results(i));
-            % end
+            % Инициализируем F_v значениями L_v (нулевое приближение)
+            F_values = L_values;
+
+            % Итеративное уточнение значений F_v (рекуррентный процесс)
+            max_iterations = 100;
+            tolerance = 1e-6;
+
+            for iter = 1:max_iterations
+                prev_values = F_values;
+
+                for i = 1:num_nodes
+                    currentNode = obj.ListOfNodes(i);
+
+                    % 1. Вычисляем G_In(v) = Σ (α_e * F_u + β_e) по входящим рёбрам
+                    G_In = 0;
+                    incomingNeighbors = obj.getIncomingNeighbors(currentNode);
+
+                    for k = 1:numel(incomingNeighbors)
+                        neighbor = incomingNeighbors(k);
+                        edgeToCurrentNode = neighbor.getEdgeToTarget(currentNode);
+
+                        % Используем текущие значения F_u
+                        neighbor_idx = find(obj.ListOfNodes == neighbor, 1);
+                        F_u = F_values(neighbor_idx);
+
+                        G_In = G_In + (edgeToCurrentNode.Alfa * F_u + edgeToCurrentNode.Beta);
+                    end
+
+                    % 2. Вычисляем Σ β_e по исходящим рёбрам
+                    sum_beta_out = 0;
+                    outgoingEdges = currentNode.getOutEdges();
+
+                    for k = 1:numel(outgoingEdges)
+                        edge = outgoingEdges(k);
+                        sum_beta_out = sum_beta_out + edge.Beta;
+                    end
+
+                    % 3. Вычисляем Σ (α_e + 1) по исходящим рёбрам
+                    sum_alpha_plus_one = 0;
+                    for k = 1:numel(outgoingEdges)
+                        edge = outgoingEdges(k);
+                        sum_alpha_plus_one = sum_alpha_plus_one + (edge.Alfa + 1);
+                    end
+
+                    if sum_alpha_plus_one == 0
+                        sum_alpha_plus_one = sum_alpha_plus_one + eps;
+                    end
+
+                    % Защита от деления на ноль
+                    if abs(sum_alpha_plus_one) < eps
+                        error('Знаменатель в формуле F_v близок к нулю для вершины %d', currentNode.ID);
+                    end
+
+                    % 4. Применяем формулу (2.6): F_v = (L_v + G_In(v) - Σ β_e) / Σ (α_e + 1)
+                    F_values(i) = (L_values(i) + G_In - sum_beta_out) / sum_alpha_plus_one;
+                end
+
+                % Проверка сходимости
+                if max(abs(F_values - prev_values)) < tolerance
+                    break;
+                end
+            end
+
+            % Сохраняем результаты в узлы
+            for i = 1:num_nodes
+                obj.ListOfNodes(i).setFResult(F_values(i));
+            end
+
+            % Сохраняем также в obj.fi_result для совместимости
+            obj.fi_result = L_values;
         end
 
         function numOfWhiteNode = GetNumOfWhiteNode(obj)
@@ -265,58 +310,15 @@ classdef GraphShell < handle
             res = results;
         end
 
-        function res = dFdAl(obj, index)
-            currentNode = obj.ListOfNodes(index);
-            innerNeighbor = obj.getIncomingNeighbors(currentNode);
-            outerEdge = currentNode.getOutEdges();
-            % G1 = 0;
-            G2 = 0;
-            G3 = 0;
-            for j = 1:numel(outerEdge)
-                edge = outerEdge(j);
-                % G1 = G1 + sign(edge.Alfa);
-                G2 = G2 + edge.Alfa;
-                G3 = G3 + edge.Beta;
+        function res = GetCurrentResult(obj, XData)
+            results = [];
+            obj.Forward(XData);
+            for i = 1:numel(obj.ListOfNodes)
+                results(end+1) = obj.ListOfNodes(i).getFResult();
             end
-
-            % G4 = 0;
-            G5 = 0;
-
-            for j = 1:numel(innerNeighbor)
-                neighbor = innerNeighbor(j);
-                edge = neighbor.getEdgeToTarget(currentNode);
-                % G4 = G4 + neighbor.getFResult() * sign(edge.Alfa);
-                G5 = G5 + (edge.Alfa * neighbor.getFResult() + edge.Beta);
-            end
-
-            % res = (G4 / (G2+1)) - ((G2 * (obj.fi_result(index) - G3 + G5)) /(G2+1)^2);
-            res = - (obj.fi_result(index) + G5 - G3) / ((G2+1)^2);
+            res = results;
         end
 
-        function res = dFdBt(obj, index)
-            curentNode = obj.ListOfNodes(index);
-            outerEdges = curentNode.getOutEdges();
-            G1 = 0;
-            for i = 1:numel(outerEdges)
-                edge = outerEdges(i);
-                G1 = G1 + edge.Alfa;
-            end
-
-            res = -1 / (G1+1);
-
-        end
-
-        function res = dFdfi(obj, index)
-            currentNode = obj.ListOfNodes(index);
-            outerEdges = currentNode.getOutEdges();
-            G1 = 0;
-            for j = 1:numel(outerEdges)
-                edge = outerEdges(j);
-                G1 = G1 + edge.Alfa;
-            end
-
-            res = 1 / (G1 + 1);
-        end
 
         function incomingNodes = getIncomingNeighbors(obj, targetNode)
             % Возвращает все узлы, у которых есть ребро в targetNode
@@ -345,13 +347,25 @@ classdef GraphShell < handle
             end
         end
 
+        function flag = IsWhiteVertice(obj, index)
+            wi = obj.GetWhiteNodesIndices;
+            flag = ismember(wi, index);
+        end
+
+        function flag = IsBlackVertice(obj, index)
+            wi = obj.GetBlackNodesIndices;
+            flag = ismember(wi, index);
+        end
+
         function SaveToFile(obj, filename)
             % Under construction
         end
 
+             
+
         function derivative = computeIncomingAlphaDerivative(obj, nodeIndex, edge, visitedNodes, derivativeCache)
-            % Вычисляет производную dF/dalpha для входящего ребра edge в вершине nodeIndex
-            % Формула: (F_u + alpha_e * dF_u/dalpha_e) / (sum_alpha_out + 1)
+            % Исправленная версия согласно формуле (3.12) и исправленному Forward
+            % Формула: (F_u + alpha_e * dF_u/dalpha_e) / sum(alpha_e + 1)
 
             % Инициализация при первом вызове
             if nargin < 4
@@ -379,9 +393,12 @@ classdef GraphShell < handle
             sourceNode = edge.SourceNode;
             sourceNodeIndex = find(obj.ListOfNodes == sourceNode, 1);
 
-            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            % Вычисляем sum(alpha_e + 1) по исходящим рёбрам текущей вершины
             outgoingEdges = currentNode.getOutEdges();
-            sum_alpha_out = sum([outgoingEdges.Alfa]);
+            sum_alpha_plus_one = 0;
+            for k = 1:numel(outgoingEdges)
+                sum_alpha_plus_one = sum_alpha_plus_one + (outgoingEdges(k).Alfa + 1);
+            end
 
             % Рекурсивно вычисляем dF_u/dalpha_e для вершины-источника
             dF_u_dalpha = obj.computeIncomingAlphaDerivative(sourceNodeIndex, edge, visitedNodes, derivativeCache);
@@ -395,16 +412,16 @@ classdef GraphShell < handle
             % Вычисляем F_u (значение функции в вершине-источнике)
             F_u = sourceNode.getFResult();
 
-            % Применяем формулу
-            derivative = (F_u + edge.Alfa * dF_u_dalpha) / (sum_alpha_out + 1);
+            % Применяем исправленную формулу
+            derivative = (F_u + edge.Alfa * dF_u_dalpha) / sum_alpha_plus_one;
 
             % Кэшируем результат
             derivativeCache(cacheKey) = derivative;
         end
-
+        
         function derivative = computeIncomingBetaDerivative(obj, nodeIndex, edge, visitedNodes, derivativeCache)
-            % Вычисляет производную dF/dbeta для входящего ребра edge в вершине nodeIndex
-            % Формула: (2 + alpha_e * dF_u/dbeta_e) / (sum_alpha_out + 1)
+            % Исправленная версия согласно формуле (3.13) и исправленному Forward
+            % Формула: (1 + alpha_e * dF_u/dbeta_e) / sum(alpha_e + 1)
 
             % Инициализация при первом вызове
             if nargin < 4
@@ -432,9 +449,12 @@ classdef GraphShell < handle
             sourceNode = edge.SourceNode;
             sourceNodeIndex = find(obj.ListOfNodes == sourceNode, 1);
 
-            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            % Вычисляем sum(alpha_e + 1) по исходящим рёбрам текущей вершины
             outgoingEdges = currentNode.getOutEdges();
-            sum_alpha_out = sum([outgoingEdges.Alfa]);
+            sum_alpha_plus_one = 0;
+            for k = 1:numel(outgoingEdges)
+                sum_alpha_plus_one = sum_alpha_plus_one + (outgoingEdges(k).Alfa + 1);
+            end
 
             % Рекурсивно вычисляем dF_u/dbeta_e для вершины-источника
             dF_u_dbeta = obj.computeIncomingBetaDerivative(sourceNodeIndex, edge, visitedNodes, derivativeCache);
@@ -445,229 +465,50 @@ classdef GraphShell < handle
                 return;
             end
 
-            % Применяем формулу
-            derivative = (2 + edge.Alfa * dF_u_dbeta) / (sum_alpha_out + 1);
+            % Применяем исправленную формулу (1 в числителе, а не 2)
+            derivative = (1 + edge.Alfa * dF_u_dbeta) / sum_alpha_plus_one;
 
             % Кэшируем результат
             derivativeCache(cacheKey) = derivative;
         end
 
         function derivative = computeOutgoingAlphaDerivative(obj, nodeIndex, edge)
-            % Вычисляет производную dF/dalpha для исходящего ребра edge из вершины nodeIndex
-            % Формула: -F_vi / (sum_alpha_out + 1)
+            % Исправленная версия согласно формуле (3.12) и исправленному Forward
+            % Формула: -F_vi / sum(alpha_e + 1)
 
             currentNode = obj.ListOfNodes(nodeIndex);
 
-            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            % Вычисляем sum(alpha_e + 1) по исходящим рёбрам текущей вершины
             outgoingEdges = currentNode.getOutEdges();
-            sum_alpha_out = sum([outgoingEdges.Alfa]);
+            sum_alpha_plus_one = 0;
+            for k = 1:numel(outgoingEdges)
+                sum_alpha_plus_one = sum_alpha_plus_one + (outgoingEdges(k).Alfa + 1);
+            end
 
             % F_vi (значение функции в текущей вершине)
             F_vi = currentNode.getFResult();
 
-            % Применяем формулу
-            derivative = -F_vi / (sum_alpha_out + 1);
+            % Применяем исправленную формулу
+            derivative = -F_vi / sum_alpha_plus_one;
         end
 
         function derivative = computeOutgoingBetaDerivative(obj, nodeIndex, edge)
-            % Вычисляет производную dF/dbeta для исходящего ребра edge из вершины nodeIndex
-            % Формула: -1 / (sum_alpha_out + 1)
+            % Исправленная версия согласно формуле (3.13) и исправленному Forward
+            % Формула: -1 / sum(alpha_e + 1)
 
             currentNode = obj.ListOfNodes(nodeIndex);
 
-            % Вычисляем sum_alpha_out (сумма alpha по исходящим рёбрам текущей вершины)
+            % Вычисляем sum(alpha_e + 1) по исходящим рёбрам текущей вершины
             outgoingEdges = currentNode.getOutEdges();
-            sum_alpha_out = sum([outgoingEdges.Alfa]);
+            sum_alpha_plus_one = 0;
+            for k = 1:numel(outgoingEdges)
+                sum_alpha_plus_one = sum_alpha_plus_one + (outgoingEdges(k).Alfa + 1);
+            end
 
-            % Применяем формулу
-            derivative = -1 / (sum_alpha_out + 1);
+            % Применяем исправленную формулу
+            derivative = -1 / sum_alpha_plus_one;
         end
-
-        function [dF_dalpha, dF_dbeta] = computeAllEdgeDerivatives(obj)
-            % Вычисляет все производные для всех рёбер графа
-            % Выход:
-            %   dF_dalpha - массив структур с производными по alpha для всех рёбер
-            %   dF_dbeta - массив структур с производными по beta для всех рёбер
-
-            numNodes = numel(obj.ListOfNodes);
-            dF_dalpha = cell(numNodes, 1);
-            dF_dbeta = cell(numNodes, 1);
-
-            for i = 1:numNodes
-                currentNode = obj.ListOfNodes(i);
-
-                % Инициализация структур для хранения производных
-                dF_dalpha{i} = struct('edge', {}, 'derivative', {});
-                dF_dbeta{i} = struct('edge', {}, 'derivative', {});
-
-                % Обработка входящих рёбер
-                incomingEdges = obj.getIncomingEdges(currentNode);
-                for j = 1:numel(incomingEdges)
-                    edge = incomingEdges(j);
-                    dAlpha = obj.computeIncomingAlphaDerivative(i, edge);
-                    dBeta = obj.computeIncomingBetaDerivative(i, edge);
-
-                    dF_dalpha{i}(end+1) = struct('edge', edge, 'derivative', dAlpha);
-                    dF_dbeta{i}(end+1) = struct('edge', edge, 'derivative', dBeta);
-                end
-
-                % Обработка исходящих рёбер
-                outgoingEdges = currentNode.getOutEdges();
-                for j = 1:numel(outgoingEdges)
-                    edge = outgoingEdges(j);
-                    dAlpha = obj.computeOutgoingAlphaDerivative(i, edge);
-                    dBeta = obj.computeOutgoingBetaDerivative(i, edge);
-
-                    dF_dalpha{i}(end+1) = struct('edge', edge, 'derivative', dAlpha);
-                    dF_dbeta{i}(end+1) = struct('edge', edge, 'derivative', dBeta);
-                end
-            end
-        end
-
-
-        function derivatives = computeAlphaDerivatives(obj, nodeIndex, visitedNodes, derivativeCache)
-            % Инициализация при первом вызове
-            if nargin < 3
-                visitedNodes = [];
-                derivativeCache = containers.Map('KeyType', 'double', 'ValueType', 'any');
-            end
-
-            % Проверка кэша
-            if derivativeCache.isKey(nodeIndex)
-                derivatives = derivativeCache(nodeIndex);
-                return;
-            end
-
-            % Проверка на цикл
-            if ismember(nodeIndex, visitedNodes)
-                derivatives.outgoing = [];
-                return;
-            end
-
-            % Добавляем текущую вершину в посещённые
-            visitedNodes = [visitedNodes, nodeIndex];
-
-            currentNode = obj.ListOfNodes(nodeIndex);
-            outgoingEdges = currentNode.getOutEdges();
-            incomingNeighbors = obj.getIncomingNeighbors(currentNode);
-
-            % Предварительные вычисления
-            alpha_out = [outgoingEdges.Alfa];
-            sum_alpha_out = sum(alpha_out);
-            F_vi = currentNode.getFResult();
-
-            % Инициализация результатов
-            derivatives.outgoing = struct('edge', outgoingEdges, 'derivative', num2cell(zeros(1, numel(outgoingEdges))));
-
-            % Обработка входящих соседей
-            neighborIndices = arrayfun(@(n) find(obj.ListOfNodes == n, 1), incomingNeighbors);
-            neighborAlphas = arrayfun(@(n) n.getEdgeToTarget(currentNode).Alfa, incomingNeighbors);
-
-            % Вычисляем производные для всех исходящих рёбер
-            for i = 1:numel(outgoingEdges)
-                edge = outgoingEdges(i);
-
-                % Векторизованное вычисление суммы
-                sum_in_terms = 0;
-                for j = 1:numel(incomingNeighbors)
-                    neighborDerivatives = obj.computeAlphaDerivatives(neighborIndices(j), visitedNodes, derivativeCache);
-                    if ~isempty(neighborDerivatives.outgoing)
-                        edgeIdx = find([neighborDerivatives.outgoing.edge] == edge, 1);
-                        if ~isempty(edgeIdx) && ~isnan(neighborDerivatives.outgoing(edgeIdx).derivative)
-                            sum_in_terms = sum_in_terms + neighborAlphas(j) * neighborDerivatives.outgoing(edgeIdx).derivative;
-                        end
-                    end
-                end
-
-                % Вычисление производной
-                derivatives.outgoing(i).derivative = (-F_vi + sum_in_terms) / (1 + sum_alpha_out + alpha_out(i));
-            end
-
-            % Кэшируем результаты
-            derivativeCache(nodeIndex) = derivatives;
-        end
-
-        function derivatives = computeBetaDerivatives(obj, nodeIndex, visitedNodes, derivativeCache)
-            % Вычисляет производные dF/dbeta для всех рёбер, связанных с вершиной nodeIndex
-
-            % Инициализация при первом вызове
-            if nargin < 3
-                visitedNodes = [];
-                derivativeCache = containers.Map('KeyType', 'double', 'ValueType', 'any');
-            end
-
-            % Проверка на цикл
-            if ismember(nodeIndex, visitedNodes)
-                if derivativeCache.isKey(nodeIndex)
-                    derivatives = derivativeCache(nodeIndex);
-                    return;
-                else
-                    derivatives.outgoing = [];
-                    return;
-                end
-            end
-
-            % Добавляем текущую вершину в посещённые
-            visitedNodes = [visitedNodes, nodeIndex];
-
-            currentNode = obj.ListOfNodes(nodeIndex);
-            outgoingEdges = currentNode.getOutEdges();
-            incomingNeighbors = obj.getIncomingNeighbors(currentNode);
-
-            % Сумма alpha по всем исходящим рёбрам
-            sum_alpha_out = sum(arrayfun(@(e) e.Alfa, outgoingEdges));
-
-            % Инициализация структур для результатов
-            derivatives.outgoing = repmat(struct('edge', [], 'derivative', 0), 1, numel(outgoingEdges));
-
-            % 1. Обработка исходящих рёбер (формула 3)
-            for i = 1:numel(outgoingEdges)
-                edge = outgoingEdges(i);
-
-                % Сумма по входящим рёбрам: sum(alpha_k * dF_u/dbeta_e)
-                sum_in_terms = 0;
-                for j = 1:numel(incomingNeighbors)
-                    neighbor = incomingNeighbors(j);
-                    neighborIndex = find(obj.ListOfNodes == neighbor, 1);
-                    neighborDerivatives = obj.computeBetaDerivatives(neighborIndex, visitedNodes, derivativeCache);
-
-                    % Ищем производную для текущего ребра edge в соседе
-                    for d = neighborDerivatives.outgoing
-                        if d.edge == edge && ~isnan(d.derivative)
-                            sum_in_terms = sum_in_terms + neighbor.getEdgeToTarget(currentNode).Alfa * d.derivative;
-                            break;
-                        end
-                    end
-                end
-
-                % Вычисление производной для исходящего ребра
-                derivative = (-1 + sum_in_terms) / (1 + sum_alpha_out);
-                % derivative = -1  / (1 + sum_alpha_out);
-
-                derivatives.outgoing(i).edge = edge;
-                derivatives.outgoing(i).derivative = derivative;
-            end
-
-            % Кэшируем результаты
-            derivativeCache(nodeIndex) = derivatives;
-        end
-
-        function [dF_dalpha, dF_dbeta] = computeAllDerivatives(obj)
-            % Вычисляет все производные для всех вершин графа
-            % Выход:
-            %   dF_dalpha - массив структур с производными по alpha
-            %   dF_dbeta - массив структур с производными по beta
-
-            numNodes = numel(obj.ListOfNodes);
-            dF_dalpha = cell(1, numNodes);
-            dF_dbeta = cell(1, numNodes);
-
-            for i = 1:numNodes
-                dF_dalpha{i} = obj.computeAlphaDerivatives(i);
-                dF_dbeta{i} = obj.computeBetaDerivatives(i);
-            end
-        end
-
+        
         function DrawGraph(obj, titleStr)
             % Метод для визуализации структуры графа
             % Использует правильные свойства для изменения цвета узлов
@@ -806,6 +647,216 @@ classdef GraphShell < handle
             axis off;
             grid off;
         end
+
+
+        function DrawGraph_New(obj, titleStr)
+            % Метод для визуализации структуры графа с нелинейными параметрами
+            % Отображает все 4 параметра на рёбрах: α, β, γ, δ
+
+            % Создаем пустой ориентированный граф
+            G = digraph();
+
+            % Получаем все ID узлов
+            nodeIDs = [obj.ListOfNodes.ID];
+
+            % Добавляем узлы в граф (используем строковые ID)
+            for i = 1:numel(nodeIDs)
+                G = addnode(G, num2str(nodeIDs(i)));
+            end
+
+            % Добавляем рёбра с метками
+            edgeLabels = {};
+            hasEdges = false;
+
+            for i = 1:numel(obj.ListOfNodes)
+                sourceNode = obj.ListOfNodes(i);
+                edges = sourceNode.getOutEdges();
+
+                for j = 1:numel(edges)
+                    edge = edges(j);
+                    targetNode = edge.TargetNode;
+
+                    if any(nodeIDs == targetNode.ID)
+                        G = addedge(G, num2str(sourceNode.ID), num2str(targetNode.ID));
+                        edgeLabels{end+1} = sprintf('α=%.2f\n β=%.2f', edge.Alfa, edge.Beta);
+                        hasEdges = true;
+                    else
+                        warning('Target node ID %d not found in graph', targetNode.ID);
+                    end
+                end
+            end
+
+            % Создаем метки узлов
+            nodeLabels = arrayfun(@(x) sprintf(' v_%d', x), nodeIDs, 'UniformOutput', false);
+
+            % Настраиваем визуализацию
+            figure;
+
+            % Увеличиваем размер фигуры для лучшего отображения
+            set(gcf, 'Position', [100, 100, 1200, 800]);
+
+            if ~hasEdges
+                h = plot(G, ...
+                    'Layout', 'force', ...
+                    'NodeLabel', nodeLabels, ...
+                    'MarkerSize', 16, ...
+                    'NodeFontSize', 14, ...
+                    'LineWidth', 2);
+            else
+                % Используем улучшенный layout для лучшего отображения меток
+                h = plot(G, ...
+                    'Layout', 'layered', ...
+                    'Direction', 'down', ...
+                    'NodeLabel', nodeLabels, ...
+                    'ArrowSize', 15, ...
+                    'LineWidth', 2, ...
+                    'EdgeFontSize', 11, ...
+                    'NodeFontSize', 16, ...
+                    'ArrowPosition', 0.9); % Стрелки ближе к цели
+
+                % Устанавливаем цвет для стрелок
+                h.EdgeColor = [0 0 0]; % Черный цвет для всех ребер
+
+                % Увеличиваем прозрачность для лучшей видимости меток
+                h.EdgeAlpha = 0.8;
+            end
+
+            % Создаем массивы цветов для узлов
+            nodeColors = zeros(numel(obj.ListOfNodes), 3);
+            blackNodes = 0;
+            whiteNodes = 0;
+
+            for i = 1:numel(obj.ListOfNodes)
+                if obj.ListOfNodes(i).getNodeType() == BWGraph.NodeColor.Black
+                    nodeColors(i,:) = [0 0 0]; % Черный цвет
+                    blackNodes = blackNodes + 1;
+                else
+                    nodeColors(i,:) = [0.9 0.9 0.9]; % Белый цвет (чистый белый)
+                    whiteNodes = whiteNodes + 1;
+                end
+            end
+
+            % Устанавливаем свойства узлов
+            h.NodeColor = [0 0 0]; % Черная окантовка для всех узлов
+            h.MarkerSize = 14; % Размер узлов
+            h.LineWidth = 1.5; % Толщина окантовки
+
+            % Для MATLAB R2019b и новее можно использовать MarkerFaceColor
+            if isprop(h, 'MarkerFaceColor')
+                h.MarkerFaceColor = nodeColors;
+            else
+                % Альтернативный способ для старых версий
+                for i = 1:numel(obj.ListOfNodes)
+                    highlight(h, num2str(nodeIDs(i)), 'NodeColor', nodeColors(i,:));
+                end
+            end
+
+            % Добавляем метки рёбер (если есть ребра)
+            if hasEdges
+                h.EdgeLabel = edgeLabels;
+                set(h, 'EdgeLabelColor', [0 0 0]); % Черный цвет текста меток
+
+                % Улучшаем отображение меток рёбер
+                if isprop(h, 'EdgeLabelRotation')
+                    h.EdgeLabelRotation = 0; % Горизонтальные метки
+                end
+
+                % Добавляем фон для меток рёбер для лучшей читаемости
+                if isprop(h, 'EdgeLabelBackgroundColor')
+                    h.EdgeLabelBackgroundColor = [1 1 0.9]; % Светло-желтый фон
+                    h.EdgeLabelBackgroundAlpha = 0.7; % Полупрозрачный
+                end
+            end
+
+            % Добавляем заголовок
+            if nargin > 1 && ~isempty(titleStr)
+                title(titleStr, 'FontSize', 16, 'FontWeight', 'bold');
+            else
+                title('Черно-белый граф с нелинейными параметрами', ...
+                    'FontSize', 16, 'FontWeight', 'bold');
+            end
+
+            % Добавляем информационную панель
+            infoText = sprintf('Узлов: %d (Черных: %d, Белых: %d)', ...
+                numel(obj.ListOfNodes), blackNodes, whiteNodes);
+            annotation('textbox', [0.02, 0.02, 0.3, 0.05], ...
+                'String', infoText, ...
+                'FontSize', 12, ...
+                'BackgroundColor', [0.95, 0.95, 0.95], ...
+                'EdgeColor', [0.5, 0.5, 0.5]);
+
+            % Добавляем легенду с параметрами
+            if hasEdges
+                % Создаем панель с пояснениями параметров
+                paramText = {...
+                    'Параметры рёбер:', ...
+                    'α - линейный коэффициент', ...
+                    'β - константное смещение'};
+
+                annotation('textbox', [0.7, 0.75, 0.2, 0.1], ...
+                    'String', paramText, ...
+                    'FontSize', 11, ...
+                    'BackgroundColor', [0.95, 0.95, 0.95], ...
+                    'EdgeColor', [0.5, 0.5, 0.5]);
+            end
+
+            % Добавляем легенду для узлов
+            if blackNodes > 0 || whiteNodes > 0
+                hold on;
+
+                % Создаем фиктивные точки для легенды
+                hBlack = scatter(NaN, NaN, 100, ...
+                    'filled', ...
+                    'MarkerFaceColor', [0 0 0], ...
+                    'MarkerEdgeColor', [0 0 0], ...
+                    'LineWidth', 1.5);
+
+                hWhite = scatter(NaN, NaN, 100, ...
+                    'filled', ...
+                    'MarkerFaceColor', [1 1 1], ...
+                    'MarkerEdgeColor', [0 0 0], ...
+                    'LineWidth', 1.5);
+
+                legendHandles = [];
+                legendLabels = {};
+
+                if blackNodes > 0
+                    legendHandles = [legendHandles, hBlack];
+                    legendLabels = [legendLabels, 'Черные вершины (без данных)'];
+                end
+                if whiteNodes > 0
+                    legendHandles = [legendHandles, hWhite];
+                    legendLabels = [legendLabels, 'Белые вершины (с данными)'];
+                end
+
+                % Создаем легенду
+                lg = legend(legendHandles, legendLabels, ...
+                    'Location', 'northeast', ...
+                    'FontSize', 12);
+
+                % Устанавливаем фон легенды
+                set(lg, 'Color', [0.95, 0.95, 0.95]);
+
+                hold off;
+            end
+
+            % Улучшаем отображение
+            set(gcf, 'Color', 'w');
+            axis off;
+            grid off;
+
+            % Добавляем сетку координат для лучшей ориентации
+            if ~hasEdges
+                grid on;
+                axis on;
+                xlabel('X координата');
+                ylabel('Y координата');
+            end
+
+            % Автоматически подгоняем размеры для лучшего отображения
+            axis tight;
+        end
+
 
         function incomingEdges = getIncomingEdges(obj, targetNode)
             % Возвращает все входящие ребра для указанного узла

@@ -1,23 +1,26 @@
+%% Очистить все
+clear; clc; close all;
+
 %% Подготовка
 import BWGraph.*;
 import BWGraph.CustomMatrix.*;
 import BWGraph.RandomGenerator.*;
 import BWGraph.Trainer.*;
 
-HeatBC = coreFunctions.PlateHeatingModel(320.0, 100, 50, 1e-5, 2, 293, 1000);
+HeatBC = coreFunctions.PlateHeatingModel(550.0, 250, 50, 1e-5, (4+11)/2, 293, 1000);
 alfaGen = AlphaGenerator(0.9);
 betaGen = BetaGenerator(1);
 
 %% Создание и настройка модели
-nodeA = Node(1, 200,'White',HeatBC);
-nodeB = Node(2, 200,'Black',HeatBC);
-nodeC = Node(3, 200,'Black',HeatBC);
-
-nodeB.addEdge(nodeA);
-nodeC.addEdge(nodeA);
+nodeA = Node(1, 293,'Black',HeatBC);
+nodeB = Node(2, 293,'Black',HeatBC);
+nodeC = Node(3, 293,'White',HeatBC);
 
 nodeA.addEdge(nodeB);
-nodeA.addEdge(nodeC);
+nodeB.addEdge(nodeC);
+
+nodeB.addEdge(nodeA);
+nodeC.addEdge(nodeB);
 
 % Создаем графовую модель
 modelShell = GraphShell(alfaGen,betaGen,nodeA,nodeB,nodeC);
@@ -26,7 +29,9 @@ modelShell = GraphShell(alfaGen,betaGen,nodeA,nodeB,nodeC);
 NodeSize = [1 1 1]; % Коэффициенты 
 NodeWeight = [1 1 1]; % Весовые коэффициенты вершин
 
-%% Генерация данных и подготовка подвыборок
+%% Отрисовать граф
+modelShell.DrawGraph('Модель нагрева');
+%% Генерация данных и подготовка подвыборок (синтетика)
 % Генерация данных с учетом индивидуальных характеристик вершин
 numSamples = 500;
 numOfNodes = numel(modelShell.ListOfNodes);
@@ -100,10 +105,15 @@ YDataTrain = YData(trainIndices);
 XDataTest = XData(testIndices);
 YDataTest = YData(testIndices);
 
+%%
+test = HeatBC.CalcCoreFunction(XData(1,1).getRow(1));
+modelShell.Forward(XData(1,1));
+test2 = modelShell.GetModelResults;
+
 %% Создаем настройщик
-trainer = Trainer(modelShell, 30);
+trainer = Trainer(modelShell, numSamples);
 %% Настройка
-trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest, 0.1, 0.9, 0.99,1e-8, NodeSize, NodeWeight, 100, 1e7, -1e7, 6.0, 0.4, 0.1, [], 'mae');
+trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest, 0.1, 0.9, 0.9,1e-8, NodeSize, NodeWeight, 100, 1e7, -1e7, 6.0, 0.4, 0.1, [], 'mae');
 %% Тестирование
 numTestSamples = numel(YDataTest);
 actualValue = zeros(1,numTestSamples);
