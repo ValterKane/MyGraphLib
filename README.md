@@ -221,7 +221,7 @@ model.Train(X_train, Y_train, X_test, Y_test, ...
 Вызывается в теле метода `Train` и выполняет коррекцию весов пакеным градиентным спуском с использованием ADAM-оптимизатора
 Сигнатура:
 ```matlab
-function Compute_V5(obj, XData, YData, Beta1, Beta2, Eps, NodesWeights, NodesLRScale, ClipUp, ClipDown, Lambda, lambda_Agg, targetWhiteIndices)
+function Compute_V5(obj, XData, YData, Beta1, Beta2, Eps, NodesWeights, NodesLRScale, ClipUp, ClipDown, Lambda, lambda_Agg, targetWhiteIndices,errorMetric)
 ```
 ### Параметры
 
@@ -240,6 +240,7 @@ function Compute_V5(obj, XData, YData, Beta1, Beta2, Eps, NodesWeights, NodesLRS
 | **`Lambda`** | `double`<br/>`mustBePositive` | Коэффициент регуляризации (L2-регуляризация или подобная). |
 | **`lambda_Agg`** | `double`<br/>`mustBeNonnegative` | Коэффициент влияния усредненной ошибки. Регуляризационный параметр для агрегирующих функций. |
 | **`targetWhiteIndices`** | `double (1,:)` | Вектор индексов целевых белых вершин, для которых рассчитывается ошибка и производные. |
+| **`errorMetric`**| 'mae', 'mse', 'rmse'| Разновидность целевой функции для расчета ошибок в белых вершинах. |
 
 ### Особенности реализации
 
