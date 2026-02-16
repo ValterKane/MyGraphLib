@@ -4,11 +4,13 @@ classdef Node < handle
         NodeType BWGraph.NodeColor                  % Цвет вершины
         NodeFunction                                % Функции вершин
         FResult double                              % Значение в вершине
-        EdgeIndex = 1;
+        EdgeIndex = 1;                              % Индекс вершины, для кеширования
+        
     end
 
     properties (Access = public)
          ID (:,:) {mustBePositive}                   % Номер вершины
+         Gamma {mustBeFinite}                        % Свободный параметр вершины
     end
     
     methods
@@ -36,8 +38,9 @@ classdef Node < handle
             obj.NodeType = nodeType;
             obj.NodeFunction = nodeFunction;
             obj.FResult = initialValue;
+            obj.Gamma = 1;
         end
-
+       
         function res = getNodeType(obj)
             res = obj.NodeType;
         end
@@ -55,7 +58,7 @@ classdef Node < handle
 
             edgeIndex = strcat(num2str(obj.ID), num2str(obj.EdgeIndex));
             edgeIndex = str2double(edgeIndex);
-            newEdge = BWGraph.Edge(obj, targetNode, 1, 1,1,1, edgeIndex);
+            newEdge = BWGraph.Edge(obj, targetNode, 1, 1, edgeIndex);
             obj.OutEdgesMap(targetNode) = newEdge;
             obj.EdgeIndex = obj.EdgeIndex + 1;
         end
@@ -122,6 +125,14 @@ classdef Node < handle
             if isempty(obj.NodeFunction)
                 res = 0;
             else
+                res = obj.Gamma * obj.NodeFunction.CalcCoreFunction(inputData);
+            end
+        end
+
+        function res = calcRawCoreFunction(obj,inputData)
+             if isempty(obj.NodeFunction)
+                res = 0;
+            else
                 res = obj.NodeFunction.CalcCoreFunction(inputData);
             end
         end
@@ -132,10 +143,7 @@ classdef Node < handle
 
         function func = getNodeFunction(obj)
             func = obj.NodeFunction;
-        end
-
-        
-        
+        end  
     end
    
 end
