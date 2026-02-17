@@ -8,7 +8,6 @@ classdef TrainingOptions
         Eps             (1,1) double {mustBePositive, mustBeFinite} = 1e-8
         
         % Параметры вершин
-        NodeWeight      (1,:) double = []
         NodeSize        (1,:) double = []
 
         % Параметры батча
@@ -26,7 +25,7 @@ classdef TrainingOptions
         Lambda_Alph          (1,1) double {mustBePositive} = 0.01
         Lambda_Beta          (1,1) double {mustBePositive} = 0.01
         Lambda_Gamma          (1,1) double {mustBePositive} = 0.01
-        Lambda_Agg           (1,1) double {mustBeNonnegative} = 0
+        Lambda_Agg           (1,1) double {mustBeNonnegative} = 1
 
         % Параметры функций настройки
         HuberDelta (1,1) double {mustBePositive, mustBeFinite} = 1
@@ -47,7 +46,6 @@ classdef TrainingOptions
                 options.Beta1           (1,1) double {mustBePositive, mustBeFinite}
                 options.Beta2           (1,1) double {mustBePositive, mustBeFinite}
                 options.Eps             (1,1) double {mustBePositive, mustBeFinite}
-                options.NodeWeight      (1,:) double {mustBeFinite}
                 options.NodeSize        (1,:) double {mustBeFinite}
                 options.Epoches         (1,1) double {mustBePositive, mustBeInteger}
                 options.ClipUp          (1,1) double {mustBeFinite}
@@ -61,16 +59,15 @@ classdef TrainingOptions
                 options.TargetNodeIndices (1,:) double
                 options.ErrorMetric     (1,1) string
                 options.LossFunction    (1,1) string
+                options.BatchSize       (1,1) double {mustBeFinite, mustBePositive}
             end
             
             % Применяем переданные значения
-            if nargin > 0
-                fields = fieldnames(options);
-                for i = 1:length(fields)
-                    field = fields{i};
-                    if ~isempty(options.(field))
-                        obj.(field) = options.(field);
-                    end
+            fields = fieldnames(options);
+            for i = 1:length(fields)
+                field = fields{i};
+                if ~isempty(options.(field))
+                    obj.(field) = options.(field);
                 end
             end
 
@@ -85,11 +82,6 @@ classdef TrainingOptions
             if isfield(options, 'NodeSize')
                 obj.NodeSize = options.NodeSize;
             end
-
-            if isfield(options, 'NodeWeight')
-                obj.NodeWeight = options.NodeWeight;
-            end
-
         end
 
         function config = toStruct(obj)

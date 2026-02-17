@@ -1,133 +1,3 @@
-%% Отрисовать граф
-modelShell.DrawGraph_New('Модель нагрева');
-
-%% Загрузка реальных данных
-data = readtable('C:\Users\darkd\Desktop\2024-2025\Математическая модель многозонной печи\Готовые данные по первой садке.xlsx');
-numOfWhiteNodes = modelShell.GetNumOfWhiteNode; % Получаем количество вершин
-numSamples = height(data);
-
-% Определим матрицы входа и выхода
-XData = repmat(BWMatrix(), numSamples, 1);
-YData = repmat(BWMatrix(), numSamples, 1);
-
-timeValues_for_v1 = (data{:,'H12'} * 60 + data{:,'M12'})*60;
-TinfValues_for_v1 = (data{:,'minT12'} + data{:, 'maxT12'})/2;
-
-timeValues_for_v2 = (data{:,'H34'} * 60 + data{:,'M34'})*60;
-TinfValues_for_v2 = (data{:,'minT34'} + data{:, 'maxT34'})/2;
-
-timeValues_for_v3 = (data{:,'H56'} * 60 + data{:,'M56'})*60;
-TinfValues_for_v3 = (data{:,'minT56'} + data{:, 'maxT56'})/2;
-
-for i = 1:numSamples
-    inputParams_for_v1 = [timeValues_for_v1(i); TinfValues_for_v1(i)];
-    inputParams_for_v2 = [timeValues_for_v2(i); TinfValues_for_v2(i)];
-    inputParams_for_v3 = [timeValues_for_v3(i); TinfValues_for_v3(i)];
-    XData(i) = XData(i).addRow(inputParams_for_v1);
-    XData(i) = XData(i).addRow(inputParams_for_v2);
-    XData(i) = XData(i).addRow(inputParams_for_v1);
-    XData(i) = XData(i).addRow(inputParams_for_v2);
-    XData(i) = XData(i).addRow(inputParams_for_v3);
-end
-
-resValue_for_v3 = (data{:,'maxTdou'} + data{:, 'minTduo'})/2;
-% resValue_for_v3 = data{:,'maxTdou'};
-
-for i = 1:numSamples
-    yMatrix = zeros(1,numOfWhiteNodes);
-    yMatrix(1) = resValue_for_v3(i);
-    YData(i) = YData(i).addRow(yMatrix);
-end
-
-indices = randperm(numSamples);
-splitPoint = round(0.7 * numSamples);
-trainIndices = indices(1:splitPoint);
-testIndices = indices(splitPoint+1:end);
- 
-% Определим обучающую и тестовую выборку
-XDataTrain = XData(trainIndices);
-YDataTrain = YData(trainIndices);
-XDataTest = XData(testIndices);
-YDataTest = YData(testIndices);
-
-%% Загрузка данных валидации
-if ~exist("validData", 'var')
-    validData = readtable("DataForCompr.xlsx");
-end
-
-numOfNodes = numel(modelShell.ListOfNodes);
-numOfWhiteNodes = modelShell.GetNumOfWhiteNode; % Получаем количество вершин
-numInputParams = HeatBC_1.GetNumOfInputParams(); % Получаем количество входных параметров
-numSamples = 131;
-
-% Определим матрицы входа и выхода
-XValidData = repmat(BWMatrix(), numSamples, 1);
-YValidData = repmat(BWMatrix(), numSamples, 1);
-
-t1 = table2array(validData(1:131,"F12_TimeDiff"));
-t2 = table2array(validData(1:131,"F34_TimeDiff"));
-t3 = table2array(validData(1:131,"F56_TimeDiff"));
-tc = table2array(validData(1:131,"F_AF"));
-T1 = (validData{1:131,'F12_TL'} + validData{1:131, 'F12_TR'})/2;
-T2 = (validData{1:131,'F34_TL'} + validData{1:131, 'F34_TR'})/2;
-T3 = (validData{1:131,'F56_TL'} + validData{1:131, 'F56_TR'})/2;
-T_y = validData{1:131,'Tmax'}; 
-
-data1 = [t1, T1];
-data2 = [t2, T2];
-data3 = [t3, T3];
-
-for i = 1:numSamples
-    XValidData(i) = XValidData(i).addRow(data1(i,:));
-    XValidData(i) = XValidData(i).addRow(data2(i,:));
-    XValidData(i) = XValidData(i).addRow(data1(i,:));
-    XValidData(i) = XValidData(i).addRow(data2(i,:));
-    XValidData(i) = XValidData(i).addRow(data3(i,:));
-end
-
-for i = 1:numSamples
-    YValidData(i) = YValidData(i).addRow(T_y(i,:));
-end
-
-%% Проверка на валидации
-
-numTestSamples = size(XValidData,1);
-
-for i = 1:numTestSamples
-    act(1,i) = YValidData(i).getRow(1);
-    result = modelShell.GetCurrentResult(XValidData(i));
-    predModel(1,i) = result(5);
-end
-
-mae_predModel = sum(abs(act - predModel)) / numel(act);
-
-fprintf("МАЕ по стабилизированной модели = %.2f\n", mae_predModel);
-
-% Строим график сравнения
-figure(...
-    'Name', 'Тестирование', ...
-    'Position', [10, 10, 900, 500], ...
-    'Color', [0.95, 0.95, 0.95], ...
-    'Resize', 'off' ...
-);
-
-hold on;
-
-% Рисуем линии фактических и модельных значений
-plot(1:numTestSamples, act, 'b-o', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Фактические значения');
-plot(1:numTestSamples, predModel, 'r--s', 'LineWidth', 2, 'MarkerSize', 6, 'DisplayName', 'Модельные значения');
-
-% Настраиваем график
-xlabel('Номер тестового примера');
-ylabel('Значение');
-title('Апробация модели на тестовом подмножестве');
-legend('show', 'Location', 'best');
-
-set(gca, 'FontSize', 14, 'FontWeight', 'bold');
-
-grid on;
-hold off;
-
 
 %% Fast Start
 clear; clc; close all;
@@ -143,14 +13,13 @@ HeatBC_3 = coreFunctions.Heating2DModel(90, 21, 21, 70, 1.5e-5, 0.3, 0.360, 1000
 
 LinearTemper = coreFunctions.LinearFunction();
 
-alfaGen = FullRandomAlfaGen(1,1e2);
-betaGen = FullRandomBetaGen(1,1e3);
+alfaGen = FullRandomAlfaGen(1,5);
+betaGen = FullRandomBetaGen(1,1e2);
 
 nodeA = Node(1, 30,'Black',HeatBC_1);
 nodeB = Node(2, 30,'Black',HeatBC_2);
-nodeC = Node(3, 30,'Black',HeatBC_1);
-% nodeD = Node(4, 30,'Black',LinearTemper);
-nodeE = Node(5, 30,'White',HeatBC_3);
+% nodeС = Node(4, 30,'Black',LinearTemper);
+nodeE = Node(3, 30,'White',HeatBC_3);
 
 
 nodeA.addEdge(nodeB);
@@ -159,18 +28,67 @@ nodeB.addEdge(nodeA);
 nodeB.addEdge(nodeE);
 nodeE.addEdge(nodeB);
 
-nodeC.addEdge(nodeA);
-nodeC.addEdge(nodeB);
+% nodeC.addEdge(nodeE);
+% nodeE.addEdge(nodeC);
 
 % nodeD.addEdge(nodeB);
 % nodeD.addEdge(nodeE);
 
-% Создаем графовую модель
-modelShell = GraphShell(alfaGen,betaGen,nodeA,nodeB,nodeC, nodeE);
+NodeWeight = [1 1 1]; % Весовые коэффициенты вершин
 
-% Индивидуальные параметры для вершин (общие для всех экспериментов)
-NodeSize = [1.3 1.3 1.3, 1.3, 1.3]; % Коэффициенты 
-NodeWeight = [1 1 1 1 1]; % Весовые коэффициенты вершин
+% Создаем графовую модель
+modelShell = GraphShell(alfaGen,betaGen,NodeWeight, nodeA,nodeB,nodeE);
+
+if ~exist("data", 'var')
+    data = readtable("cleaned_data_for_compr.xlsx");
+end
+
+totalBatch = 300;
+
+% Получение исходных данных
+t1 = table2array(data(1:totalBatch,"F12_TimeDiff"));
+t2 = table2array(data(1:totalBatch,"F34_TimeDiff"));
+t3 = table2array(data(1:totalBatch,"F56_TimeDiff"));
+
+T1 = (data{1:totalBatch,'F12_TL'} + data{1:totalBatch, 'F12_TR'})/2;
+T2 = (data{1:totalBatch,'F34_TL'} + data{1:totalBatch, 'F34_TR'})/2;
+T3 = (data{1:totalBatch,'F56_TL'} + data{1:totalBatch, 'F56_TR'})/2;
+T_AF = 120 + (rand(totalBatch,1) - 0.5);
+T_y = data{1:totalBatch,'Tmax'};
+
+fprintf('Новый размер выборки: %d\n', totalBatch);
+
+data_for_one = [t1, T1];
+data_for_two = [t2, T2];
+data_for_three = [t3, T3];
+
+% Определим матрицы входа и выхода
+XData = repmat(BWMatrix(), totalBatch, 1);
+YData = repmat(BWMatrix(), totalBatch, 1);
+
+for i = 1:totalBatch
+    XData(i) = XData(i).addRow(data_for_one(i,:));
+    XData(i) = XData(i).addRow(data_for_two(i,:));
+    XData(i) = XData(i).addRow(data_for_three(i,:));
+end
+
+for i = 1:totalBatch
+    YData(i) = YData(i).addRow(T_y(i,:));
+end
+
+indices = randperm(totalBatch);
+splitPoint = round(0.7 * totalBatch);
+trainIndices = indices(1:splitPoint);
+testIndices = indices(splitPoint+1:end);
+ 
+% Определим обучающую и тестовую выборку
+XDataTrain = XData(trainIndices);
+YDataTrain = YData(trainIndices);
+XDataTest = XData(testIndices);
+YDataTest = YData(testIndices);
+
+%% Отрисовать граф
+modelShell.DrawGraph_New('Модель нагрева');
 %%
 if ~exist("data", 'var')
     data = readtable("FirstPlaceData.xlsx");
@@ -220,74 +138,27 @@ XDataTrain = XData(trainIndices);
 YDataTrain = YData(trainIndices);
 XDataTest = XData(testIndices);
 YDataTest = YData(testIndices);
-%% 
-if ~exist("data", 'var')
-    data = readtable("cleaned_data_for_compr.xlsx");
-end
-
-totalBatch = 300;
-
-% Получение исходных данных
-t1 = table2array(data(1:totalBatch,"F12_TimeDiff"));
-t2 = table2array(data(1:totalBatch,"F34_TimeDiff"));
-t3 = table2array(data(1:totalBatch,"F56_TimeDiff"));
-
-T1 = (data{1:totalBatch,'F12_TL'} + data{1:totalBatch, 'F12_TR'})/2;
-T2 = (data{1:totalBatch,'F34_TL'} + data{1:totalBatch, 'F34_TR'})/2;
-T3 = (data{1:totalBatch,'F56_TL'} + data{1:totalBatch, 'F56_TR'})/2;
-T_y = data{1:totalBatch,'Tmax'};
-
-fprintf('Новый размер выборки: %d\n', totalBatch);
-
-data_for_one = [t1, T1];
-data_for_two = [t2, T2];
-data_for_three = [t3, T3];
-
-% Определим матрицы входа и выхода
-XData = repmat(BWMatrix(), totalBatch, 1);
-YData = repmat(BWMatrix(), totalBatch, 1);
-
-for i = 1:totalBatch
-    XData(i) = XData(i).addRow(data_for_one(i,:));
-    XData(i) = XData(i).addRow(data_for_two(i,:));
-    XData(i) = XData(i).addRow(data_for_one(i,:));
-    XData(i) = XData(i).addRow(data_for_three(i,:));
-end
-
-for i = 1:totalBatch
-    YData(i) = YData(i).addRow(T_y(i,:));
-end
-
-indices = randperm(totalBatch);
-splitPoint = round(0.7 * totalBatch);
-trainIndices = indices(1:splitPoint);
-testIndices = indices(splitPoint+1:end);
- 
-% Определим обучающую и тестовую выборку
-XDataTrain = XData(trainIndices);
-YDataTrain = YData(trainIndices);
-XDataTest = XData(testIndices);
-YDataTest = YData(testIndices);
 
 %% Настройка учителя
 % Опции настройки
-trainerOptions = TrainingOptions("LearningRate", 0.01, ...
+trainerOptions = TrainingOptions( ...
+    "LearningRate", 0.1, ...
     "Beta1", 0.9, ...
     "Beta2", 0.999, ...
     "Eps", 1e-8, ...
     "NodeSize", [1.3, 1.3, 1.3, 1.3, 1.3], ...
-    "NodeWeight", [1,1,1,1,1], ...
     "Epoches", 500, ...
     "ClipUp", 1e15, ...
     "ClipDown", -1e15, ...
     "TargetError", 10, ...
-    "Lambda_Agg", 1, ...
+    "Lambda_Agg", 0, ... % Так как одна белая вершина
     "Lambda_Alph", 0.3, ...
     "Lambda_Beta", 0.3, ...
     "Lambda_Gamma",0.3, ...
     "ErrorMetric",'mae', ...
     "LossFunction",'mse', ...
-    "TargetNodeIndices",[]);
+    "TargetNodeIndices",[], ...
+    "BatchSize", 1);
 
 % Инициализация учителя
 trainer = Trainer(modelShell, trainerOptions);
@@ -301,7 +172,7 @@ numTestSamples = size(XDataTest,1);
 for i = 1:numTestSamples
     act(i) = YDataTest(i).getRow(1);
     result = modelShell.GetCurrentResult(XDataTest(i));
-    predModel(i) = result(4);
+    predModel(i,1) = result(3);
     model1 = coreFunctions.Heating2DModel(30, 21, 21, 50, 1.5e-5, 0.3, 0.360, 30, 10);
     res1 = model1.CalcCoreFunction(XDataTest(i).getRow(1));
     model2 = coreFunctions.Heating2DModel(60, 21, 21, 60, 1.5e-5, 0.3, 0.360, res1, 10);

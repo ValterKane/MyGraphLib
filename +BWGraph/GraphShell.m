@@ -137,7 +137,7 @@ classdef GraphShell < handle
     end
 
     methods
-        function obj = GraphShell(AlphaGenerator, BetaGenerator, varargin)
+        function obj = GraphShell(AlphaGenerator, BetaGenerator, NodeWeight, varargin)
 
             if ~isa(AlphaGenerator, 'BWGraph.RandomGenerator.IRandomGen') & ...
                     ~isa(BetaGenerator, 'BWGraph.RandomGenerator.IRandomGen')
@@ -156,6 +156,7 @@ classdef GraphShell < handle
                 error('Все аргументы должны быть объектами класса Node.');
             end
 
+            
             % Собираем все ID из переданных узлов
             ids = arrayfun(@(x) x.ID, [varargin{:}]);
 
@@ -180,6 +181,10 @@ classdef GraphShell < handle
             % Обновляем счётчики узлов
             obj.numOfBlackNodes = numel(obj.GetBlackNodesIndices);
             obj.numOfWhiteNodes = numel(obj.GetWhiteNodesIndices);
+
+            % Устанавливаем гамма-параметры
+            gammas = num2cell(NodeWeight);
+            [obj.ListOfNodes.Gamma] = gammas{:};
         end
 
 
@@ -613,13 +618,14 @@ classdef GraphShell < handle
 
         function DrawGraph_New(obj, titleStr)
             % Метод для визуализации структуры графа с нелинейными параметрами
-            % Отображает все 4 параметра на рёбрах: α, β, γ, δ
+            % Отображает все 4 параметра: α, β, γ, δ
 
             % Создаем пустой ориентированный граф
             G = digraph();
 
             % Получаем все ID узлов
             nodeIDs = [obj.ListOfNodes.ID];
+            nodeGammas = [obj.ListOfNodes.Gamma];
 
             % Добавляем узлы в граф (используем строковые ID)
             for i = 1:numel(nodeIDs)
@@ -649,7 +655,7 @@ classdef GraphShell < handle
             end
 
             % Создаем метки узлов
-            nodeLabels = arrayfun(@(x) sprintf(' v_%d', x), nodeIDs, 'UniformOutput', false);
+            nodeLabels = arrayfun(@(x,g) sprintf(' v_%d γ=%.2f', x, g), nodeIDs,nodeGammas, 'UniformOutput', false);
 
             % Настраиваем визуализацию
             figure;

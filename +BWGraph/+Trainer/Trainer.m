@@ -9,6 +9,9 @@ classdef Trainer < handle
         incomingNeighborsCache
         distancesCache
 
+        % Кэш индексов для настройки
+        NodeIndexMap
+
         % Моменты ADAM
         mAl
         vAl
@@ -21,9 +24,8 @@ classdef Trainer < handle
         bestAl                     % Лучшие альфа-значения по результатам настройки
         bestBt                     % Лучшие бета-значения по результатам настройки
         bestGm                     % Лучшие gamma-значения по результатам настройки
-    end
-
-    properties (Access = private)
+        
+        % Остальные параметры 
         graph                   BWGraph.GraphShell    % Графовая модель
         nodes
         errorArray                  % Массив ошибок обучения
@@ -35,6 +37,8 @@ classdef Trainer < handle
 
         % Параметры настройки
         TrainingOptions BWGraph.Trainer.TrainingOptions
+        
+        % Параметры
 
         % --- Сохранение истории ошибок ---
         trainErrors = [];
@@ -173,11 +177,11 @@ classdef Trainer < handle
                     obj.bestTestError = testError;
                     % Сохраняем лучшие параметры
                     obj.SaveBestParameters();
-                else
-                    stopTraining = true;
-                    stopReason = ... 
-                        sprintf('Не обнаружено серьезного изменения в ошибке на тестовом множестве (%s = %3f',obj.TrainingOptions.ErrorMetric, testError);
                 end
+                %     stopTraining = true;
+                %     stopReason = ... 
+                %         sprintf('Не обнаружено серьезного изменения в ошибке на тестовом множестве (%s = %3f',obj.TrainingOptions.ErrorMetric, testError);
+                % end
 
                 if epoch > 1
                     if errorDiffs(end-1) > 0 && errorDiffs(end) < 0 ...
@@ -501,6 +505,14 @@ classdef Trainer < handle
                     obj.incomingNeighborsCache{i} = obj.graph.getIncomingNeighbors(obj.nodes(i));
                 end
             end
+            
+            % Кэшируем индексы
+            if isempty(obj.NodeIndexMap)
+                obj.NodeIndexMap = containers.Map('KeyType', 'char', 'ValueType', 'double');
+                for idx = 1:numNodes
+                    obj.NodeIndexMap(class(obj.nodes(idx))) = idx;
+                end
+            end
 
             % Инициализация моментов ADAM
             if isempty(obj.mAl)
@@ -570,8 +582,7 @@ classdef Trainer < handle
                     % Расчет усредненной ошибки для целевых белых вершин
                     meanTargetError = mean(J_white(obj.TrainingOptions.TargetNodeIndices));
 
-                    % Считаем метрику находу в процессе обучения (экономим
-                    % время)
+                    % Считаем метрику находу в процессе обучения
                     switch obj.TrainingOptions.ErrorMetric
                         case 'mae'
                             total_errors = total_errors + abs(meanTargetError);
@@ -585,33 +596,46 @@ classdef Trainer < handle
 
                     % Cчитаем лосс-функцию
                     for i = obj.whiteNodeIndices
+                        error = J_white(i);
                         switch obj.TrainingOptions.LossFunction
                             case 'mae'
                                 % Mean Absolute Error
-                                J_white(i) = J_white(i) + obj.TrainingOptions.Lambda_Agg * abs(meanTargetError);
+                                J_white(i) = sign(error) + obj.TrainingOptions.Lambda_Agg * sign(meanTargetError);
                             case 'mse'
                                 % Mean Squared Error
-                                J_white(i) = 0.5 * J_white(i) + obj.TrainingOptions.Lambda_Agg * (meanTargetError^2);
+                                J_white(i) = error + obj.TrainingOptions.Lambda_Agg * meanTargetError;
                             case 'huber'
-                                % Huber Loss - комбинация MSE и MAE
-                                obj.TrainingOptions.HuberDelta = 1.0; % Можно попробовать вариатор сюда поставить
-                                if abs(meanTargetError) <= delta
-                                    % Квадратичная часть для малых ошибок
-                                    J_white(i) = J_white(i) + obj.TrainingOptions.Lambda_Agg * 0.5 * (meanTargetError^2);
+                                % Huber Loss
+                                delta = obj.TrainingOptions.HuberDelta;
+                                if abs(error) <= delta
+                                    % Квадратичная часть: L = 0.5 * error^2
+                                    % Производная: error
+                                    huber_deriv = error;
                                 else
-                                    % Линейная часть для больших ошибок
-                                    J_white(i) = J_white(i) + obj.TrainingOptions.Lambda_Agg * delta * (abs(meanTargetError) - 0.5 * delta);
+                                    % Линейная часть: L = delta * (|error| - 0.5*delta)
+                                    % Производная: delta * sign(error)
+                                    huber_deriv = delta * sign(error);
                                 end
+
+                                % Производная для meanTargetError
+                                if abs(meanTargetError) <= delta
+                                    target_deriv = meanTargetError;
+                                else
+                                    target_deriv = delta * sign(meanTargetError);
+                                end
+                                J_white(i) = huber_deriv + obj.TrainingOptions.Lambda_Agg * target_deriv;
+
                             case 'logcosh'
-                                % Log-Cosh Loss - гладкая аппроксимация MAE
-                                % log(cosh(x)) ≈ x^2/2 для малых x и |x| - log(2) для больших x
-                                J_white(i) = J_white(i) + obj.TrainingOptions.Lambda_Agg * log(cosh(meanTargetError));
+                                % Log-Cosh Loss: L = log(cosh(error))
+                                % Производная: tanh(error)
+                                J_white(i) = tanh(error) + obj.TrainingOptions.Lambda_Agg * tanh(meanTargetError);
                             otherwise
                                 % Если что-то пошло не так, то MSE
-                                J_white(i) = J_white(i) + obj.TrainingOptions.Lambda_Agg * abs(meanTargetError);
+                                J_white(i) = sign(error) + obj.TrainingOptions.Lambda_Agg * sign(meanTargetError);
                         end
                     end
 
+                  
                     % --- Распространение ошибок для черных вершин по формуле (3.2) ---
                     % 1. Предварительно вычисляем коэффициенты δ для всех вершин
                     delta_in_cache = cell(numNodes, 1);
@@ -629,7 +653,7 @@ classdef Trainer < handle
                         for edge_idx = 1:numel(incomingEdges)
                             e = incomingEdges(edge_idx);
                             sourceNode = e.SourceNode;
-                            sourceIdx = find(obj.nodes == sourceNode, 1);
+                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
                             if ~isempty(sourceIdx)
                                 delta_in(sourceIdx) = e.Alfa / sum_alpha_out_plus_one;
                             end
@@ -641,7 +665,7 @@ classdef Trainer < handle
                         for edge_idx = 1:numel(outgoingEdges)
                             e = outgoingEdges(edge_idx);
                             targetNode = e.TargetNode;
-                            targetIdx = find(obj.nodes == targetNode, 1);
+                            targetIdx = obj.NodeIndexMap(class(targetNode));
                             if ~isempty(targetIdx)
                                 % Нужно вычислить знаменатель для целевой вершины
                                 targetOutEdges = obj.outgoingEdgesCache{targetIdx};
@@ -675,7 +699,7 @@ classdef Trainer < handle
                             sum_in = 0;
                             for neighbor = incomingNeighbors
                                 if ~isempty(neighbor)
-                                    neighborIdx = find(obj.nodes == neighbor, 1);
+                                    neighborIdx = obj.NodeIndexMap(class(neighbor));
                                     if ~isempty(neighborIdx) && delta_in(neighborIdx) ~= 0
                                         if A_in(i, neighborIdx) == 0 && J_prev(neighborIdx) ~= 0
                                             sum_in = sum_in + delta_in(neighborIdx) * J_prev(neighborIdx);
@@ -689,7 +713,7 @@ classdef Trainer < handle
                             sum_out = 0;
                             for e = outgoingEdges
                                 targetNode = e.TargetNode;
-                                targetIdx = find(obj.nodes == targetNode, 1);
+                                targetIdx = obj.NodeIndexMap(class(targetNode));
                                 if ~isempty(targetIdx) && delta_out(targetIdx) ~= 0
                                     if A_out(i, targetIdx) == 0 && J_prev(targetIdx) ~= 0
                                         sum_out = sum_out + delta_out(targetIdx) * J_prev(targetIdx);
@@ -720,12 +744,11 @@ classdef Trainer < handle
                     for i = 1:numNodes
                         if J_total(i) == 0, continue; end
                         edges = obj.outgoingEdgesCache{i};
-                        weight = obj.TrainingOptions.NodeWeight(i);
                         
                         % Градиенты для вершины (gamma)
                         key_gamma = sprintf('node%d_gamma', i);
                         dF_dgamma = gamma_derivatives(key_gamma);
-                        batchGmGrad{i} = batchGmGrad{i} - dF_dgamma * J_total(i) * weight;
+                        batchGmGrad{i} = batchGmGrad{i} - dF_dgamma * J_total(i);
                         
                         % Градиенты для исходящих рёбер (alpha и beta)
                         for j = 1:numel(edges)
@@ -744,8 +767,8 @@ classdef Trainer < handle
                             end
 
                             % Обновление градиентов с регуляризацией (формула 3.10-3.11)
-                            batchAlGrad{i}(j) = batchAlGrad{i}(j) - dF_dalpha_out * J_total(i) * weight;
-                            batchBtGrad{i}(j) = batchBtGrad{i}(j) - dF_dbeta_out * J_total(i) * weight;
+                            batchAlGrad{i}(j) = batchAlGrad{i}(j) - dF_dalpha_out * J_total(i);
+                            batchBtGrad{i}(j) = batchBtGrad{i}(j) - dF_dbeta_out * J_total(i);
                         end
 
                         % Градиенты для входящих рёбер (alpha и beta)
@@ -753,10 +776,9 @@ classdef Trainer < handle
                         for j = 1:numel(incomingEdges)
                             edge = incomingEdges(j);
                             sourceNode = edge.SourceNode;
-                            sourceIdx = find(obj.nodes == sourceNode, 1);
+                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
 
                             if isempty(sourceIdx), continue; end
-
                             % Градиент для α
                             key_alpha = sprintf('node%d_edge%d_alpha_in', i, edge.ID);
                             if isKey(alpha_derivatives, key_alpha)
@@ -775,12 +797,10 @@ classdef Trainer < handle
                                 edgePos = find(sourceEdges == edge, 1);
 
                                 if ~isempty(edgePos)
-                                    % Обновление градиентов (формула 3.10-3.11)
-                                    sourceWeight = obj.TrainingOptions.NodeWeight(sourceIdx);
                                     batchAlGrad{sourceIdx}(edgePos) = batchAlGrad{sourceIdx}(edgePos) - ...
-                                        dF_dalpha_in * J_total(i) * sourceWeight;
+                                        dF_dalpha_in * J_total(i);
                                     batchBtGrad{sourceIdx}(edgePos) = batchBtGrad{sourceIdx}(edgePos) - ...
-                                        dF_dbeta_in * J_total(i) * sourceWeight;
+                                        dF_dbeta_in * J_total(i);
                                 end
                             end
                         end
