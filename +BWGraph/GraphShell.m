@@ -136,7 +136,7 @@ classdef GraphShell < handle
 
     end
 
-    methods
+    methods (Access = public)
         function obj = GraphShell(AlphaGenerator, BetaGenerator, NodeWeight, varargin)
 
             if ~isa(AlphaGenerator, 'BWGraph.RandomGenerator.IRandomGen') & ...
@@ -156,7 +156,6 @@ classdef GraphShell < handle
                 error('Все аргументы должны быть объектами класса Node.');
             end
 
-            
             % Собираем все ID из переданных узлов
             ids = arrayfun(@(x) x.ID, [varargin{:}]);
 
@@ -376,22 +375,24 @@ classdef GraphShell < handle
             % Текущая вершина           
             v = obj.ListOfNodes(nodeIndex);
 
-            % Значение выхода по ядру вершины
-            L_v = v.calcRawCoreFunction(inputData);
+            % Значение dL/dGamma
+            dL_dGamma = v.computeLGammaDerivative(inputData);
 
-            % Выходные ребра вершины
-            outgoingEdges = v.getOutEdges();
+            % % Выходные ребра вершины
+            % outgoingEdges = v.getOutEdges();
+            % 
+            % denominator = 0;
+            % for k = 1:numel(outgoingEdges)
+            %     denominator = denominator + (outgoingEdges(k).Alfa + 1);
+            % end
 
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
+            denominator = sum(arrayfun(@(e) e.Alfa + 1, v.getOutEdges()));
 
             if abs(denominator) < eps
                 error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
             end
 
-            dF_dGamma = L_v / denominator;
+            dF_dGamma = dL_dGamma / denominator;
         end
 
         function dF_dalpha = computeOutgoingAlphaDerivativeForEdge(obj, nodeIndex)

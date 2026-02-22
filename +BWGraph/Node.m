@@ -5,6 +5,7 @@ classdef Node < handle
         NodeFunction                                % Функции вершин
         FResult double                              % Значение в вершине
         EdgeIndex = 1;                              % Индекс вершины, для кеширования
+        ActivationType (1,1) string {mustBeMember(ActivationType, {'linear', 'sigmoid', 'relu', 'tanh'})} = "linear"                             % Тип нелинейности в функции
         
     end
 
@@ -14,12 +15,13 @@ classdef Node < handle
     end
     
     methods
-        function obj = Node(ID, initialValue, nodeType, nodeFunction)
+        function obj = Node(ID, initialValue, nodeType, nodeFunction, activationType)
             arguments
                 ID {mustBePositive}
                 initialValue {mustBeFinite}
                 nodeType BWGraph.NodeColor
                 nodeFunction
+                activationType (1,1) string {mustBeMember(activationType, {'linear', 'sigmoid', 'relu', 'tanh'})}
             end
             
             % Проверка: nodeFunction может быть пустым только для White узлов
@@ -39,6 +41,7 @@ classdef Node < handle
             obj.NodeFunction = nodeFunction;
             obj.FResult = initialValue;
             obj.Gamma = 1;
+            obj.ActivationType = activationType;
         end
        
         function res = getNodeType(obj)
@@ -123,9 +126,20 @@ classdef Node < handle
 
         function res = calcNodeFunc(obj, inputData)
             if isempty(obj.NodeFunction)
-                res = 0;
+                raw = 0;
             else
-                res = obj.Gamma * obj.NodeFunction.CalcCoreFunction(inputData);
+                raw = obj.Gamma * obj.NodeFunction.CalcCoreFunction(inputData);
+            end
+            
+            switch obj.ActivationType
+                case 'linear'
+                    res = raw;
+                case 'sigmoid'
+                    res = 1./(1 + exp(-raw));
+                case 'tanh'
+                    res = tanh(raw);
+                case 'relu'
+                    res = max(0, raw);
             end
         end
 
@@ -134,6 +148,23 @@ classdef Node < handle
                 res = 0;
             else
                 res = obj.NodeFunction.CalcCoreFunction(inputData);
+            end
+        end
+
+        function dL_dgamma = computeLGammaDerivative(obj, inputData)
+            raw = obj.Gamma * obj.NodeFunction.CalcCoreFunction(inputData);
+            L = obj.calcNodeFunc(inputData);
+            rawCore = obj.calcRawCoreFunction(inputData);
+
+            switch obj.ActivationType
+                case 'linear'
+                    dL_dgamma = rawCore;
+                case 'sigmoid'
+                    dL_dgamma = L * (1 - L) * rawCore;
+                case 'tanh'
+                    dL_dgamma = (1 - L^2) * rawCore;
+                case 'relu'
+                    dL_dgamma = rawCore * (raw > 0);
             end
         end
 

@@ -1,4 +1,4 @@
-classdef TrainingOptions
+classdef TrainingOptions < handle
         
     properties
         % Основные параметры оптимизатора

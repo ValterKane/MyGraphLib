@@ -8,6 +8,10 @@ classdef Trainer < handle
         outgoingEdgesCache
         incomingNeighborsCache
         distancesCache
+        edgeSources ;
+        edgeTargets;
+        edgeAlphas;
+        allEdges;
 
         % Кэш индексов для настройки
         NodeIndexMap
@@ -415,7 +419,6 @@ classdef Trainer < handle
             end
         end
 
-        
         function updateProgress(~, current, total, message)
             % Обновление прогресс-бара
             % current - текущая итерация
@@ -476,7 +479,6 @@ classdef Trainer < handle
             end
         end
 
-        
         function Compute_V5(obj, XData, YData)
             arguments
                 obj                 BWGraph.Trainer.Trainer,
@@ -540,6 +542,15 @@ classdef Trainer < handle
             total_points = 0;
             numBatches = ceil(numSamples / obj.TrainingOptions.BatchSize);
 
+            % Инициализация градиентов по всем батчам
+            batchAlGrad = cell(numNodes, numBatches);
+            batchBtGrad = cell(numNodes, numBatches);
+            batchGmGrad = cell(numNodes, numBatches);
+
+            % Инициализация дельта-массивов для всего батча
+            delta_in_cache = cell(numNodes, numBatches);
+            delta_out_cache = cell(numNodes, numBatches);
+
             for batchIdx = 1:numBatches
                 obj.t = obj.t + 1;
                 batchStart = (batchIdx-1)*obj.TrainingOptions.BatchSize + 1;
@@ -549,17 +560,93 @@ classdef Trainer < handle
 
                 obj.updateProgress(batchIdx, numBatches);
 
-                % Инициализация градиентов для всего батча
-                batchAlGrad = cell(numNodes, 1);
-                batchBtGrad = cell(numNodes, 1);
-                batchGmGrad = cell(numNodes, 1);
+                % Вычисляем delta_in, delta_out для всего батча
+                % Вычисляем все суммы в знаменателе
+                sum_alpha_out_plus_one = zeros(1, numNodes);
+
                 for i = 1:numNodes
-                    numEdges = numel(obj.outgoingEdgesCache{i});
-                    batchAlGrad{i} = zeros(1, numEdges);
-                    batchBtGrad{i} = zeros(1, numEdges);
-                    batchGmGrad{i} = 0;
+                    outgoingEdges = obj.outgoingEdgesCache{i};
+                    if ~isempty(outgoingEdges)
+                        % Векторизованное вычисление суммы
+                        alphas = [outgoingEdges.Alfa];
+                        sum_alpha_out_plus_one(i) = sum(alphas) + 1;
+                    else
+                        sum_alpha_out_plus_one(i) = 1; % 1 для пустого набора
+                    end
+                end
+                
+                % Основной цикл
+                for i = 1:numNodes
+                    incomingEdges = obj.incomingEdgesCache{i};
+                    outgoingEdges = obj.outgoingEdgesCache{i};
+
+                    delta_in = zeros(1, numNodes);
+
+                    if ~isempty(incomingEdges)
+                        % Векторизованная обработка входящих ребер
+                        sourceIndices = zeros(1, numel(incomingEdges));
+                        alphas = zeros(1, numel(incomingEdges));
+
+                        for edge_idx = 1:numel(incomingEdges)
+                            e = incomingEdges(edge_idx);
+                            sourceNode = e.SourceNode;
+                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
+                            if ~isempty(sourceIdx)
+                                sourceIndices(edge_idx) = sourceIdx;
+                                alphas(edge_idx) = e.Alfa;
+                            end
+                        end
+
+                        % Убираем нулевые индексы
+                        validIdx = sourceIndices > 0;
+                        sourceIndices = sourceIndices(validIdx);
+                        alphas = alphas(validIdx);
+
+                        % Заполняем delta_in
+                        for k = 1:numel(sourceIndices)
+                            delta_in(sourceIndices(k)) = alphas(k) / sum_alpha_out_plus_one(sourceIndices(k));
+                        end
+                    end
+                    delta_in_cache{i,numBatches} = delta_in;
+
+                    % δ_Out для исходящих рёбер
+                    delta_out = zeros(1, numNodes);
+
+                    if ~isempty(outgoingEdges)
+                        targetIndices = zeros(1, numel(outgoingEdges));
+                        alphas = zeros(1, numel(outgoingEdges));
+
+                        for edge_idx = 1:numel(outgoingEdges)
+                            e = outgoingEdges(edge_idx);
+                            targetNode = e.TargetNode;
+                            targetIdx = obj.NodeIndexMap(class(targetNode));
+                            if ~isempty(targetIdx)
+                                targetIndices(edge_idx) = targetIdx;
+                                alphas(edge_idx) = e.Alfa;
+                            end
+                        end
+
+                        % Убираем нулевые индексы
+                        validIdx = targetIndices > 0;
+                        targetIndices = targetIndices(validIdx);
+                        alphas = alphas(validIdx);
+
+                        % Заполняем delta_out (используем предвычисленные суммы)
+                        for k = 1:numel(targetIndices)
+                            delta_out(targetIndices(k)) = alphas(k) / sum_alpha_out_plus_one(targetIndices(k));
+                        end
+
+                    end
+                    delta_out_cache{i,numBatches} = delta_out;
                 end
 
+                for i = 1:numNodes
+                    numEdges = numel(obj.outgoingEdgesCache{i});
+                    batchAlGrad{i,batchIdx} = zeros(1, numEdges);
+                    batchBtGrad{i,batchIdx} = zeros(1, numEdges);
+                    batchGmGrad{i,batchIdx} = 0;
+                end
+                
                 % --- Обработка примеров в батче ---
                 for k = 1:numInBatch
                     sampleIdx = batchIndices(k);
@@ -581,6 +668,7 @@ classdef Trainer < handle
 
                     % Расчет усредненной ошибки для целевых белых вершин
                     meanTargetError = mean(J_white(obj.TrainingOptions.TargetNodeIndices));
+                  
 
                     % Считаем метрику находу в процессе обучения
                     switch obj.TrainingOptions.ErrorMetric
@@ -635,47 +723,6 @@ classdef Trainer < handle
                         end
                     end
 
-                  
-                    % --- Распространение ошибок для черных вершин по формуле (3.2) ---
-                    % 1. Предварительно вычисляем коэффициенты δ для всех вершин
-                    delta_in_cache = cell(numNodes, 1);
-                    delta_out_cache = cell(numNodes, 1);
-
-                    for i = 1:numNodes
-                        incomingEdges = obj.incomingEdgesCache{i};
-                        outgoingEdges = obj.outgoingEdgesCache{i};
-
-                        % Вычисляем Σ α_e + 1 для исходящих рёбер
-                        sum_alpha_out_plus_one = sum(arrayfun(@(e) e.Alfa + 1, outgoingEdges));
-
-                        % Коэффициенты δ_In для входящих рёбер (формула 3.5)
-                        delta_in = zeros(1, numNodes);
-                        for edge_idx = 1:numel(incomingEdges)
-                            e = incomingEdges(edge_idx);
-                            sourceNode = e.SourceNode;
-                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
-                            if ~isempty(sourceIdx)
-                                delta_in(sourceIdx) = e.Alfa / sum_alpha_out_plus_one;
-                            end
-                        end
-                        delta_in_cache{i} = delta_in;
-
-                        % Коэффициенты δ_Out для исходящих рёбер (формула 3.4)
-                        delta_out = zeros(1, numNodes);
-                        for edge_idx = 1:numel(outgoingEdges)
-                            e = outgoingEdges(edge_idx);
-                            targetNode = e.TargetNode;
-                            targetIdx = obj.NodeIndexMap(class(targetNode));
-                            if ~isempty(targetIdx)
-                                % Нужно вычислить знаменатель для целевой вершины
-                                targetOutEdges = obj.outgoingEdgesCache{targetIdx};
-                                sum_alpha_target = sum(arrayfun(@(edge) edge.Alfa, targetOutEdges));
-                                delta_out(targetIdx) = e.Alfa / (sum_alpha_target + 1);
-                            end
-                        end
-                        delta_out_cache{i} = delta_out;
-                    end
-
                     J_total = zeros(1, numNodes);
                     J_total(obj.whiteNodeIndices) = J_white(obj.whiteNodeIndices);
 
@@ -690,8 +737,8 @@ classdef Trainer < handle
                         updated = false;
 
                         for i = obj.blackNodeIndices
-                            delta_in = delta_in_cache{i};
-                            delta_out = delta_out_cache{i};
+                            delta_in = delta_in_cache{i,numBatches};
+                            delta_out = delta_out_cache{i,numBatches };
                             incomingNeighbors = obj.incomingNeighborsCache{i};
                             outgoingEdges = obj.outgoingEdgesCache{i}';
 
@@ -767,8 +814,8 @@ classdef Trainer < handle
                             end
 
                             % Обновление градиентов с регуляризацией (формула 3.10-3.11)
-                            batchAlGrad{i}(j) = batchAlGrad{i}(j) - dF_dalpha_out * J_total(i);
-                            batchBtGrad{i}(j) = batchBtGrad{i}(j) - dF_dbeta_out * J_total(i);
+                            batchAlGrad{i,batchIdx}(j) = batchAlGrad{i,batchIdx}(j) - dF_dalpha_out * J_total(i);
+                            batchBtGrad{i,batchIdx}(j) = batchBtGrad{i,batchIdx}(j) - dF_dbeta_out * J_total(i);
                         end
 
                         % Градиенты для входящих рёбер (alpha и beta)
@@ -797,9 +844,9 @@ classdef Trainer < handle
                                 edgePos = find(sourceEdges == edge, 1);
 
                                 if ~isempty(edgePos)
-                                    batchAlGrad{sourceIdx}(edgePos) = batchAlGrad{sourceIdx}(edgePos) - ...
+                                    batchAlGrad{sourceIdx,batchIdx}(edgePos) = batchAlGrad{sourceIdx,batchIdx}(edgePos) - ...
                                         dF_dalpha_in * J_total(i);
-                                    batchBtGrad{sourceIdx}(edgePos) = batchBtGrad{sourceIdx}(edgePos) - ...
+                                    batchBtGrad{sourceIdx,batchIdx}(edgePos) = batchBtGrad{sourceIdx,batchIdx}(edgePos) - ...
                                         dF_dbeta_in * J_total(i);
                                 end
                             end
@@ -813,8 +860,8 @@ classdef Trainer < handle
                         edges = obj.outgoingEdgesCache{i};
                         for j = 1:numel(edges)
                             edge = edges(j);
-                            batchAlGrad{i}(j) = batchAlGrad{i}(j) + obj.TrainingOptions.Lambda_Alph * edge.Alfa;
-                            batchBtGrad{i}(j) = batchBtGrad{i}(j) + obj.TrainingOptions.Lambda_Beta * edge.Beta;
+                            batchAlGrad{i,batchIdx}(j) = batchAlGrad{i,batchIdx}(j) + obj.TrainingOptions.Lambda_Alph * edge.Alfa;
+                            batchBtGrad{i,batchIdx}(j) = batchBtGrad{i,batchIdx}(j) + obj.TrainingOptions.Lambda_Beta * edge.Beta;
                         end
                     end
                 end
@@ -822,14 +869,14 @@ classdef Trainer < handle
                 % --- Нормализация и обрезка градиентов ---
                 invNumInBatch = 1 / numInBatch;
                 for i = 1:numNodes
-                    if ~isempty(batchAlGrad{i})
-                        batchAlGrad{i} = min(max(batchAlGrad{i} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
+                    if ~isempty(batchAlGrad{i,batchIdx})
+                        batchAlGrad{i,batchIdx} = min(max(batchAlGrad{i,batchIdx} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
                     end
-                    if ~isempty(batchBtGrad{i})
-                        batchBtGrad{i} = min(max(batchBtGrad{i} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
+                    if ~isempty(batchBtGrad{i,batchIdx})
+                        batchBtGrad{i,batchIdx} = min(max(batchBtGrad{i,batchIdx} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
                     end
-                    if ~isempty(batchGmGrad{i})
-                        batchGmGrad{i} = min(max(batchGmGrad{i} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
+                    if ~isempty(batchGmGrad{i,batchIdx})
+                        batchGmGrad{i,batchIdx} = min(max(batchGmGrad{i,batchIdx} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
                     end
                 end
 
@@ -844,12 +891,12 @@ classdef Trainer < handle
                     if isempty(edges), continue; end
 
                     % Обновление моментов ADAM (формулы 3.14-3.15)
-                    obj.mAl{i} = obj.TrainingOptions.Beta1 * obj.mAl{i} + (1-obj.TrainingOptions.Beta1) * batchAlGrad{i};
-                    obj.vAl{i} = obj.TrainingOptions.Beta2 * obj.vAl{i} + (1-obj.TrainingOptions.Beta2) * (batchAlGrad{i}.^2);
-                    obj.mBt{i} = obj.TrainingOptions.Beta1 * obj.mBt{i} + (1-obj.TrainingOptions.Beta1) * batchBtGrad{i};
-                    obj.vBt{i} = obj.TrainingOptions.Beta2 * obj.vBt{i} + (1-obj.TrainingOptions.Beta2) * (batchBtGrad{i}.^2);
-                    obj.mGm{i} = obj.TrainingOptions.Beta1 * obj.mGm{i} + (1-obj.TrainingOptions.Beta1) * batchGmGrad{i};
-                    obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i}.^2);
+                    obj.mAl{i} = obj.TrainingOptions.Beta1 * obj.mAl{i} + (1-obj.TrainingOptions.Beta1) * batchAlGrad{i,batchIdx};
+                    obj.vAl{i} = obj.TrainingOptions.Beta2 * obj.vAl{i} + (1-obj.TrainingOptions.Beta2) * (batchAlGrad{i,batchIdx}.^2);
+                    obj.mBt{i} = obj.TrainingOptions.Beta1 * obj.mBt{i} + (1-obj.TrainingOptions.Beta1) * batchBtGrad{i,batchIdx};
+                    obj.vBt{i} = obj.TrainingOptions.Beta2 * obj.vBt{i} + (1-obj.TrainingOptions.Beta2) * (batchBtGrad{i,batchIdx}.^2);
+                    obj.mGm{i} = obj.TrainingOptions.Beta1 * obj.mGm{i} + (1-obj.TrainingOptions.Beta1) * batchGmGrad{i,batchIdx};
+                    obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i,batchIdx}.^2);
 
                     % Применение обновлений (формула 3.16)
                     lr = obj.learningRate * obj.TrainingOptions.NodeSize(i);
