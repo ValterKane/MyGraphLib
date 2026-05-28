@@ -1,4 +1,4 @@
-classdef (Abstract) ICoreF
+classdef (Abstract) ICoreF < handle
     methods (Abstract)
         % Основные методы интерфейса
         result = CalcCoreFunction(obj, InputParams)

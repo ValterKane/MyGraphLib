@@ -337,9 +337,13 @@ classdef GraphShell < handle
                 outgoingEdges = currentNode.getOutEdges();
                 sum_alpha_plus_one = 0;
 
-                for k = 1:numel(outgoingEdges)
-                    edge = outgoingEdges(k);
-                    sum_alpha_plus_one = sum_alpha_plus_one + (edge.Alfa + 1);
+                if ~isempty(outgoingEdges)
+                    for k = 1:numel(outgoingEdges)
+                        edge = outgoingEdges(k);
+                        sum_alpha_plus_one = sum_alpha_plus_one + (edge.Alfa + 1);
+                    end
+                else
+                    sum_alpha_plus_one = 1;
                 end
 
                 % ЗАПИСЫВАЕМ ТОЛЬКО В ДИАГОНАЛЬНЫЙ ЭЛЕМЕНТ
@@ -378,61 +382,27 @@ classdef GraphShell < handle
             % Значение dL/dGamma
             dL_dGamma = v.computeLGammaDerivative(inputData);
 
-            % % Выходные ребра вершины
-            % outgoingEdges = v.getOutEdges();
+            % Выходные ребра вершины
+            outgoingEdges = v.getOutEdges();
             % 
             % denominator = 0;
             % for k = 1:numel(outgoingEdges)
             %     denominator = denominator + (outgoingEdges(k).Alfa + 1);
             % end
 
-            denominator = sum(arrayfun(@(e) e.Alfa + 1, v.getOutEdges()));
+            if ~isempty(outgoingEdges)
+                denominator = sum(arrayfun(@(e) e.Alfa + 1, outgoingEdges));
+            else
+                denominator = 1;
+            end
+            % 
+            % denominator = sum(arrayfun(@(e) e.Alfa + 1, outgoingEdges));
 
             if abs(denominator) < eps
                 error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
             end
 
             dF_dGamma = dL_dGamma / denominator;
-        end
-
-        function dF_dalpha = computeOutgoingAlphaDerivativeForEdge(obj, nodeIndex)
-            % Вспомогательная функция для прямого вычисления
-            % ∂F_v/∂α_e для ИСХОДЯЩЕГО ребра без проверки кэша
-
-            F_v = obj.ListOfNodes(nodeIndex).getFResult();
-
-            currentNode = obj.ListOfNodes(nodeIndex);
-            outgoingEdges = currentNode.getOutEdges();
-
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
-
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
-
-            dF_dalpha = -F_v / denominator;
-        end
-
-        function dF_dbeta = computeOutgoingBetaDerivativeForEdge(obj, nodeIndex)
-            % Вспомогательная функция для прямого вычисления
-            % ∂F_v/∂β_e для ИСХОДЯЩЕГО ребра без проверки кэша
-
-            currentNode = obj.ListOfNodes(nodeIndex);
-            outgoingEdges = currentNode.getOutEdges();
-
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
-
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
-
-            dF_dbeta = -1 / denominator;
         end
 
         function [alpha_derivatives, beta_derivatives, gama_derivatives] = computeAllDerivativesInOrder(obj, XData)
@@ -581,17 +551,22 @@ classdef GraphShell < handle
             currentNode = obj.ListOfNodes(nodeIndex);
             outgoingEdges = currentNode.getOutEdges();
 
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
+            if ~isempty(outgoingEdges)
+                denominator = 0;
+                
+                for k = 1:numel(outgoingEdges)
+                    denominator = denominator + (outgoingEdges(k).Alfa + 1);
+                end
 
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
+                if abs(denominator) < eps
+                    error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
+                end
 
-            % Формула (3.13)
-            dF_dalpha = (F_u + alpha_e * dF_source_dalpha) / denominator;
+                % Формула (3.13)
+                dF_dalpha = (F_u + alpha_e * dF_source_dalpha) / denominator;
+            else
+                dF_dalpha = F_u + alpha_e * dF_source_dalpha;
+            end 
         end
 
         function dF_dbeta = computeIncomingBetaDerivativeDirect(obj, nodeIndex, edge, dF_source_dbeta)
@@ -603,18 +578,25 @@ classdef GraphShell < handle
             % Знаменатель для вершины v
             currentNode = obj.ListOfNodes(nodeIndex);
             outgoingEdges = currentNode.getOutEdges();
+            
+            if ~isempty(outgoingEdges)
+                
+                denominator = 0;
+                
+                for k = 1:numel(outgoingEdges)
+                    denominator = denominator + (outgoingEdges(k).Alfa + 1);
+                end
+                
+                if abs(denominator) < eps
+                    error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
+                end
 
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
+                dF_dbeta = (2 + alpha_e * dF_source_dbeta) / denominator;
+
+            else
+                dF_dbeta = alpha_e * dF_source_dbeta;
             end
-
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
-
-            % Формула (3.14)
-            dF_dbeta = (2 + alpha_e * dF_source_dbeta) / denominator;
+            
         end
 
         function DrawGraph_New(obj, titleStr)

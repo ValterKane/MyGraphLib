@@ -13,20 +13,19 @@ CoreF = LinearFunction();
 alfaGen = AlphaGenerator(0.9);
 betaGen = BetaGenerator(2);
 
-nodeA = Node(1, 100, "White", CoreF);
-nodeB = Node(2, 100, "Black", []);
-nodeC = Node(3, 100, "Black", []);
+nodeA = Node(1, 100, "White", CoreF,"linear");
+nodeB = Node(2, 100, "Black", [],"linear");
+nodeC = Node(3, 100, "Black", [],"linear");
 
 nodeA.addEdge(nodeC);
 nodeA.addEdge(nodeB);
-nodeB.addEdge(nodeB);
 
 % Индивидуальные параметры для вершин (общие для всех экспериментов)
-NodeSize = [1.5 0.5 0.5 0.5 0.5]; % Коэффициенты 
-NodeWeight = [1.5 0.5 0.5 0.5 0.5]; % Весовые коэффициенты вершин
+NodeSize = [1.5 0.5 0.5]; % Коэффициенты 
+NodeWeight = [1 1 1]; % Весовые коэффициенты вершин
 
 % Создаем графовую модель
-modelShell = GraphShell(alfaGen, betaGen, nodeA, nodeB, nodeC);
+modelShell = GraphShell(alfaGen, betaGen, NodeWeight,nodeA, nodeB, nodeC);
 
 %% Создаем входные данные
 % Генерация данных с учетом индивидуальных характеристик вершин
@@ -101,14 +100,34 @@ title(sprintf('Разбиение данных: %d (обуч) / %d (тест)', 
 legend(labels, 'Location', 'best', 'FontSize', 12);
 
 %% Отобразить граф
-modelShell.DrawGraph("Структура модели до настройки");
+modelShell.DrawGraph_New("Структура модели до настройки");
 
-%% Настройка модели
-% Задаем настройщик
-trainer = Trainer(modelShell, 30);
+%% Настройка учителя
+% Опции настройки
+trainerOptions = TrainingOptions( ...
+    "LearningRate", 0.1, ...
+    "Beta1", 0.9, ...
+    "Beta2", 0.999, ...
+    "Eps", 1e-8, ...
+    "NodeSize", [1 1 1], ...
+    "Epoches", 500, ...
+    "ClipUp", 1e15, ...
+    "ClipDown", -1e15, ...
+    "TargetError", 14, ...
+    "Lambda_Agg", 0, ... % Так как одна белая вершина
+    "Lambda_Alph", 0.3, ...
+    "Lambda_Beta", 0.3, ...
+    "Lambda_Gamma",0.3, ...
+    "ErrorMetric",'mae', ...
+    "LossFunction",'mse', ...
+    "TargetNodeIndices",[], ...
+    "BatchSize", 1);
 
-%% Вызываем настройщик
-trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest, 0.1, 0.9, 0.99, 1e-8, NodeSize, NodeWeight, 1000, 1e7, -1e7, 10.0, 0.1, 0, [], 'mae');
+% Инициализация учителя
+trainer = Trainer(modelShell, trainerOptions);
+
+%% Запуск процесса
+trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest);
 
 %% Тестирование модели
 

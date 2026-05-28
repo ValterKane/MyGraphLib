@@ -152,8 +152,8 @@ classdef Node < handle
         end
 
         function dL_dgamma = computeLGammaDerivative(obj, inputData)
-            raw = obj.Gamma * obj.NodeFunction.CalcCoreFunction(inputData);
             L = obj.calcNodeFunc(inputData);
+            raw = obj.Gamma * obj.calcRawCoreFunction(inputData);
             rawCore = obj.calcRawCoreFunction(inputData);
 
             switch obj.ActivationType

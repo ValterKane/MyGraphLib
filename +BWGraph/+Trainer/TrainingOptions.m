@@ -2,10 +2,10 @@ classdef TrainingOptions < handle
         
     properties
         % Основные параметры оптимизатора
-        LearningRate    (1,1) double {mustBePositive, mustBeFinite} = 0.001
-        Beta1           (1,1) double {mustBePositive, mustBeFinite} = 0.9
-        Beta2           (1,1) double {mustBePositive, mustBeFinite} = 0.999
-        Eps             (1,1) double {mustBePositive, mustBeFinite} = 1e-8
+        LearningRate    (1,1) double {mustBePositive, mustBeFinite} = 0.01;
+        Beta1           (1,1) double {mustBePositive, mustBeFinite} = 0.9;
+        Beta2           (1,1) double {mustBePositive, mustBeFinite} = 0.999;
+        Eps             (1,1) double {mustBePositive, mustBeFinite} = 1e-8;
         
         % Параметры вершин
         NodeSize        (1,:) double = []
@@ -14,21 +14,23 @@ classdef TrainingOptions < handle
         BatchSize       (1,1) double {mustBePositive, mustBeFinite} = 1;
         
         % Параметры обучения
-        Epoches         (1,1) double {mustBePositive, mustBeInteger} = 100
-        TargetError     (1,1) double {mustBePositive, mustBeFinite} = 1e-5
+        Epoches         (1,1) double {mustBePositive, mustBeInteger} = 1;
+        TargetError     (1,1) double {mustBePositive, mustBeFinite} = 0.5;
         
         % Параметры градиента
-        ClipUp          (1,1) double {mustBeFinite} = 1e5
-        ClipDown        (1,1) double {mustBeFinite} = -1e5
+        ClipUp          (1,1) double {mustBeFinite}
+        ClipDown        (1,1) double {mustBeFinite}
         
         % Параметры регуляризации
-        Lambda_Alph          (1,1) double {mustBePositive} = 0.01
-        Lambda_Beta          (1,1) double {mustBePositive} = 0.01
-        Lambda_Gamma          (1,1) double {mustBePositive} = 0.01
-        Lambda_Agg           (1,1) double {mustBeNonnegative} = 1
+        Lambda_Alph          (1,1) double {mustBeNonnegative}
+        Lambda_Beta          (1,1) double {mustBeNonnegative}
+        Lambda_Gamma         (1,1) double {mustBeNonnegative}
+        Lambda_Agg           (1,1) double {mustBeNonnegative}
+        Lambda_Self          (1,1) double {mustBeNonnegative}
+        Lambda_Struct        (1,1) double {mustBeNonnegative}
 
         % Параметры функций настройки
-        HuberDelta (1,1) double {mustBePositive, mustBeFinite} = 1
+        HuberDelta (1,1) double {mustBePositive, mustBeFinite} = 1;
         
         % Параметры анализа
         TargetNodeIndices (1,:) double = [] % По умолчанию анализируются все белые вершины
@@ -57,9 +59,11 @@ classdef TrainingOptions < handle
                 options.HuberDelta      (1,1) double {mustBePositive, mustBeFinite}
                 options.Lambda_Agg      (1,1) double {mustBeNonnegative}
                 options.TargetNodeIndices (1,:) double
-                options.ErrorMetric     (1,1) string
-                options.LossFunction    (1,1) string
+                options.ErrorMetric     (1,1) string {mustBeMember(options.ErrorMetric, {'mae', 'mse', 'rmse', 'mape'})}
+                options.LossFunction    (1,1) string {mustBeMember(options.LossFunction, {'mae', 'mse', 'huber', 'logcosh'})}
                 options.BatchSize       (1,1) double {mustBeFinite, mustBePositive}
+                options.Lambda_Struct   (1,1) double {mustBeNonnegative}
+                options.Lambda_Self     (1,1) double {mustBeNonnegative}
             end
             
             % Применяем переданные значения

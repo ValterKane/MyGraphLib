@@ -8,20 +8,17 @@ import BWGraph.CustomMatrix.*;
 import BWGraph.RandomGenerator.*;
 import BWGraph.Trainer.*;
 
-HeatBC_1 = coreFunctions.Heating2DModel(30, 20, 20, 70, 1.5e-5, 0.3, 0.360, 30, 10);
-HeatBC_2 = coreFunctions.Heating2DModel(60, 20, 20, 60, 1.5e-5, 0.3, 0.360, 500, 10);
-HeatBC_3 = coreFunctions.Heating2DModel(90, 20, 20, 50, 1.5e-5, 0.3, 0.360, 1000, 10);
+HeatBC_1 = coreFunctions.Heating2DModel(200, 20, 20, 70, 1.5e-5, 0.3, 0.360, 30, 10);
+HeatBC_2 = coreFunctions.Heating2DModel(300, 20, 20, 60, 1.0e-5, 0.3, 0.360, 400, 10);
+HeatBC_3 = coreFunctions.Heating2DModel(400, 20, 20, 50, 0.5e-5, 0.3, 0.360, 700, 10);
 
-LinearTemper = coreFunctions.LinearFunction();
-
-alfaGen = FullRandomAlfaGen(1,5); % Гиперпараметр
+alfaGen = FullRandomAlfaGen(1,1e1); % Гиперпараметр
 betaGen = FullRandomBetaGen(1,1e2); % Гиперпараметр
 
 FirstZone = Node(1, 30,'Black',HeatBC_1, 'linear');
 SecondZone = Node(2, 30,'Black',HeatBC_2, 'linear');
 ThirdZone = Node(3, 30,'White',HeatBC_3, 'linear');
-
-% Inter12Zone = Node(4, 30, "Black", HeatBC_1, "relu");
+% Inter12Zone = Node(4, 30, "Black", HeatBC_1, "sigmoid");
 % Inter23Zone = Node(5, 30, "Black", HeatBC_1, "relu");
 
 FirstZone.addEdge(SecondZone);
@@ -29,42 +26,48 @@ SecondZone.addEdge(FirstZone);
 
 SecondZone.addEdge(ThirdZone);
 ThirdZone.addEdge(SecondZone);
-
+% 
 % Inter12Zone.addEdge(FirstZone);
 % Inter12Zone.addEdge(SecondZone);
-
+% 
 % Inter23Zone.addEdge(SecondZone);
 % Inter23Zone.addEdge(ThirdZone);
 
 % Гиперпараметр
-NodeWeight = [1 1 1]; % Весовые коэффициенты вершин
+NodeWeight = [0.5 0.5 1]; % Весовые коэффициенты вершин
 
 % Создаем графовую модель
 modelShell = GraphShell(alfaGen,betaGen,NodeWeight, FirstZone, SecondZone, ThirdZone);
 
 if ~exist("data", 'var')
-    data = readtable("special_cleaned.xlsx");
+    data = readtable("\Новые данные\06.05.2026.xlsx");
 end
-
+%%
 % Гиперпараметры
-totalBatch = 300;
+totalBatch = 100;
 initial = 1;
 
-% Получение исходных данных
-t1 = table2array(data(initial:totalBatch,"F12_TimeDiff"));
-t2 = table2array(data(initial:totalBatch,"F34_TimeDiff"));
-t3 = table2array(data(initial:totalBatch,"F56_TimeDiff"));
+t1 = table2array(data(initial:totalBatch,"t12_H").*3600) + table2array(data(initial:totalBatch,"t12_M").*60);
+t2 = table2array(data(initial:totalBatch,"t34_H").*3600) + table2array(data(initial:totalBatch,"t34_M").*60);
+t3 = table2array(data(initial:totalBatch,"t56_H").*3600) + table2array(data(initial:totalBatch,"t56_M").*60);
 
-T1 = (data{initial:totalBatch,'F12_TL'} + data{initial:totalBatch, 'F12_TR'})/2;
-T2 = (data{initial:totalBatch,'F34_TL'} + data{initial:totalBatch, 'F34_TR'})/2;
-T3 = (data{initial:totalBatch,'F56_TL'} + data{initial:totalBatch, 'F56_TR'})/2;
-T_y = data{initial:totalBatch,'Tmax'};
+T1 = data{initial:totalBatch,"T12_Avg"};
+T2 = data{initial:totalBatch,"T34_Avg"};
+T3 = data{initial:totalBatch,"T56_Avg"};
+T_y = data{initial:totalBatch,"T_Res_Max"};
+% 
+% U_3 = data{initial:totalBatch, "U_Avg"};
+% Rpm = data{initial:totalBatch, "n_klet"};
+% weight = data{initial:totalBatch, "Weight"};
 
 fprintf('Новый размер выборки: %d\n', totalBatch);
 
 data_for_one = [t1, T1];
 data_for_two = [t2, T2];
 data_for_three = [t3, T3];
+
+XData_for_gb = [t1, t2, t3, T1, T2, T3];
+YData_for_gb = T_y;
 
 % Определим матрицы входа и выхода
 XData = repmat(BWMatrix(), (totalBatch-initial)+1, 1);
@@ -75,23 +78,31 @@ for i = 1:(totalBatch-initial)+1
     XData(i) = XData(i).addRow(data_for_two(i,:));
     XData(i) = XData(i).addRow(data_for_three(i,:));
     % XData(i) = XData(i).addRow(data_for_one(i,:));
-    % XData(i) = XData(i).addRow(data_for_two(i,:));
 end
 
 for i = 1:(totalBatch-initial)+1
     YData(i) = YData(i).addRow(T_y(i,:));
 end
 
+% cv = cvpartition(size(XData,1), "HoldOut", 0.2);
+% idx_train = training(cv);
+% idx_test = test(cv);
+
 indices = randperm((totalBatch-initial)+1);
-splitPoint = round(0.8 * (totalBatch-initial)+1);
-trainIndices = indices(1:splitPoint);
-testIndices = indices(splitPoint+1:end);
+splitPoint = round(0.7 * (totalBatch-initial)+1);
+idx_train = indices(1:splitPoint);
+idx_test = indices(splitPoint+1:end);
  
 % Определим обучающую и тестовую выборку
-XDataTrain = XData(trainIndices);
-YDataTrain = YData(trainIndices);
-XDataTest = XData(testIndices);
-YDataTest = YData(testIndices);
+XDataTrain = XData(idx_train);
+YDataTrain = YData(idx_train);
+XDataTest = XData(idx_test);
+YDataTest = YData(idx_test);
+
+XTrain_GB = XData_for_gb(idx_train,:);
+yTrain_GB = YData_for_gb(idx_train);
+XTest_GB = XData_for_gb(idx_test,:);
+yTest_GB = YData_for_gb(idx_test);
 
 %% Отрисовать граф
 modelShell.DrawGraph_New('Модель нагрева');
@@ -99,19 +110,21 @@ modelShell.DrawGraph_New('Модель нагрева');
 %% Настройка учителя
 % Опции настройки
 trainerOptions = TrainingOptions( ...
-    "LearningRate", 0.1, ...
-    "Beta1", 0.9, ...
-    "Beta2", 0.999, ...
+    "LearningRate", 0.01, ...
+    "Beta1", 0.6, ...
+    "Beta2", 0.8, ...
     "Eps", 1e-8, ...
-    "NodeSize", [1.3, 1.3, 1.3, 1.3, 1.3], ...
+    "NodeSize", [1 1 1 1], ...
     "Epoches", 500, ...
-    "ClipUp", 1e15, ...
-    "ClipDown", -1e15, ...
-    "TargetError", 14, ...
+    "ClipUp", 1e18, ...
+    "ClipDown", -1e18, ...
+    "TargetError", 17, ...
     "Lambda_Agg", 0, ... % Так как одна белая вершина
-    "Lambda_Alph", 0.3, ...
-    "Lambda_Beta", 0.3, ...
-    "Lambda_Gamma",0.3, ...
+    "Lambda_Alph", 0.1, ...
+    "Lambda_Beta", 0.1, ...
+    "Lambda_Gamma",0.1, ...
+    "Lambda_Self", 0.1, ...
+    "Lambda_Struct", 0.9, ...
     "ErrorMetric",'mae', ...
     "LossFunction",'mae', ...
     "TargetNodeIndices",[], ...
@@ -130,14 +143,7 @@ for i = 1:numTestSamples
     act(i) = YDataTest(i).getRow(1);
     result = modelShell.GetCurrentResult(XDataTest(i));
     predModel(i) = result(3);
-    model1 = coreFunctions.Heating2DModel(30, 21, 21, 50, 1.5e-5, 0.3, 0.360, 30, 10);
-    res1 = model1.CalcCoreFunction(XDataTest(i).getRow(1));
-    model2 = coreFunctions.Heating2DModel(60, 21, 21, 60, 1.5e-5, 0.3, 0.360, res1, 10);
-    res2 = model2.CalcCoreFunction(XDataTest(i).getRow(2));
-    model3 = coreFunctions.Heating2DModel(90, 21, 21, 70, 1.5e-5, 0.3, 0.360, res2, 10);
-    res3(i) = HeatBC_3.CalcCoreFunction(XDataTest(i).getRow(3));
 end
-
 %% 
 
 ValidMatrix = BWMatrix();
@@ -154,8 +160,112 @@ prediction_down = prediction - 18.5;
 fprintf("Прогноз: %2f, Верх: %2f, Низ: %2f",prediction, prediction_up, prediction_down);
 
 %%
+umTrees = 6;
+gbModel = fitrensemble(XTrain_GB, yTrain_GB, ...
+    'Method', 'LSBoost', ...
+    'NumLearningCycles', 100, ...
+    'Learners', 'tree', ...
+    'LearnRate', 0.1);
+
+% Предсказание
+yPredGB = predict(gbModel, XTest_GB);
+
+% Оценка качества
+mseGB = mean((yPredGB - yTest_GB).^2);
+r2GB = 1 - sum((yTest_GB - yPredGB).^2) / sum((yTest_GB - mean(yTest_GB)).^2);
+fprintf('Градиентный бустинг - MSE: %.4f, R²: %.4f\n', mseGB, r2GB);
+
+scatter(yTest_GB, yPredGB);
+hold on;
+plot([min(yTest_GB) max(yTest_GB)], [min(yTest_GB) max(yTest_GB)], 'r--');
+xlabel('Истинные значения');
+ylabel('Предсказания GB');
+title('Градиентный бустинг');
+grid on;
+
+%% Чек модели
 diagnostics_BW = plotHeatingPrediction(act,predModel);
+%% Чек 3Heat
 diagnostics_3Heat = plotHeatingPrediction(act,res3);
+%% Чек LSBoost (xGBoost на деревьях с МНК)
+diagnostics_LSBoost = plotHeatingPrediction(act, yPredGB);
+
+%% Новые данные для валидации изменения
+
+% Гиперпараметры
+totalBatch = 300;
+initial = 150;
+
+t1 = table2array(data1(initial:totalBatch,"t12_H").*120) + table2array(data1(initial:totalBatch,"t12_M").*60);
+t2 = table2array(data1(initial:totalBatch,"t12_H").*120) + table2array(data1(initial:totalBatch,"t12_M").*60);
+t3 = table2array(data1(initial:totalBatch,"t12_H").*120) + table2array(data1(initial:totalBatch,"t12_M").*60);
+
+T1 = data1{initial:totalBatch,"T12_Avg"};
+T2 = data1{initial:totalBatch,"T34_Avg"};
+T3 = data1{initial:totalBatch,"T56_Avg"};
+T_y = data1{initial:totalBatch,"T_res_max"};
+
+fprintf('Новый размер выборки: %d\n', totalBatch);
+
+data_for_one = [t1, T1];
+data_for_two = [t2, T2];
+data_for_three = [t3, T3];
+
+XData_for_gb = [t1, t2, t3, T1,T2,T3];
+YData_for_gb = T_y;
+
+% Определим матрицы входа и выхода
+XData = repmat(BWMatrix(), (totalBatch-initial)+1, 1);
+YData = repmat(BWMatrix(), (totalBatch-initial)+1, 1);
+
+for i = 1:(totalBatch-initial)+1
+    XData(i) = XData(i).addRow(data_for_one(i,:));
+    XData(i) = XData(i).addRow(data_for_two(i,:));
+    XData(i) = XData(i).addRow(data_for_three(i,:));
+end
+
+for i = 1:(totalBatch-initial)+1
+    YData(i) = YData(i).addRow(T_y(i,:));
+end
+
+indices = randperm((totalBatch-initial)+1);
+splitPoint = round(0.7 * (totalBatch-initial)+1);
+trainIndices = indices(1:splitPoint);
+testIndices = indices(splitPoint+1:end);
+ 
+% Определим обучающую и тестовую выборку
+XDataTrain = XData(trainIndices);
+YDataTrain = YData(trainIndices);
+XDataTest = XData(testIndices);
+YDataTest = YData(testIndices);
+
+XTrain_GB = XData_for_gb(trainIndices,:);
+yTrain_GB = YData_for_gb(trainIndices);
+XTest_GB = XData_for_gb(testIndices,:);
+yTest_GB = YData_for_gb(testIndices);
+
+numTestSamples = size(XDataTest,1);
+
+for i = 1:numTestSamples
+    act(i) = YDataTest(i).getRow(1);
+    result = modelShell.GetCurrentResult(XDataTest(i));
+    predModel(i) = result(3);
+    model1 = coreFunctions.Heating2DModel(30, 21, 21, 50, 1.5e-5, 0.3, 0.360, 30, 10);
+    res1 = model1.CalcCoreFunction(XDataTest(i).getRow(1));
+    model2 = coreFunctions.Heating2DModel(60, 21, 21, 60, 1.5e-5, 0.3, 0.360, res1, 10);
+    res2 = model2.CalcCoreFunction(XDataTest(i).getRow(2));
+    model3 = coreFunctions.Heating2DModel(90, 21, 21, 70, 1.5e-5, 0.3, 0.360, res2, 10);
+    res3(i) = HeatBC_3.CalcCoreFunction(XDataTest(i).getRow(3));
+end
+
+yPredGB = predict(gbModel, XTest_GB);
+
+%% Чек модели
+diagnostics_BW_new = plotHeatingPrediction(act,predModel);
+%% Чек 3Heat
+diagnostics_3Heat_new = plotHeatingPrediction(act,res3);
+%% Чек LSBoost (xGBoost на деревьях с МНК)
+diagnostics_LSBoost_new = plotHeatingPrediction(act, yPredGB);
 
 %%
 function diagnostics = plotHeatingPrediction(y_true, y_pred, time_vector, model_name)

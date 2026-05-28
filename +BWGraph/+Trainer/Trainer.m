@@ -153,7 +153,7 @@ classdef Trainer < handle
                 end
 
                 if epoch > 0.8*obj.TrainingOptions.Epoches
-                    LearningRate = 0.005;
+                    LearningRate = 0.0005;
                 end
 
                 epochStart = tic;
@@ -161,7 +161,7 @@ classdef Trainer < handle
                 % Основной алгоритм настройки
                 obj.Compute_V5(XDataTrain, YDataTrain);
 
-                fprintf('\nНастройка на эпохе №%d завершена!\n',epoch)
+                fprintf('\nНастройка на эпохе No%d завершена!\n',epoch)
                 trainEerror = obj.trainErrors(end);
 
                 % Расчет ошибки на тестовой выборке
@@ -229,9 +229,9 @@ classdef Trainer < handle
                 grid(ax1, 'on');
 
                 % График learning rate в логарифмической шкале
-                semilogy(ax2, 1:epoch, obj.learningRate * ones(1, epoch), 'r.', 'MarkerSize', 10);
+                semilogy(ax2, 1:epoch, LearningRate * ones(1, epoch), 'r.', 'MarkerSize', 10);
                 hold(ax2, 'on');
-                semilogy(ax2, 1:epoch, obj.learningRate * ones(1, epoch), 'r-', 'LineWidth', 0.5);
+                semilogy(ax2, 1:epoch, LearningRate * ones(1, epoch), 'r-', 'LineWidth', 0.5);
                 hold(ax2, 'off');
                 title(ax2, 'Шаг настройки (логарифмическая шкала)');
                 xlabel(ax2, 'Итерация');
@@ -508,14 +508,6 @@ classdef Trainer < handle
                 end
             end
             
-            % Кэшируем индексы
-            if isempty(obj.NodeIndexMap)
-                obj.NodeIndexMap = containers.Map('KeyType', 'char', 'ValueType', 'double');
-                for idx = 1:numNodes
-                    obj.NodeIndexMap(class(obj.nodes(idx))) = idx;
-                end
-            end
-
             % Инициализация моментов ADAM
             if isempty(obj.mAl)
                 obj.mAl = cell(numNodes, 1);
@@ -581,63 +573,31 @@ classdef Trainer < handle
                     outgoingEdges = obj.outgoingEdgesCache{i};
 
                     delta_in = zeros(1, numNodes);
-
                     if ~isempty(incomingEdges)
-                        % Векторизованная обработка входящих ребер
-                        sourceIndices = zeros(1, numel(incomingEdges));
-                        alphas = zeros(1, numel(incomingEdges));
-
                         for edge_idx = 1:numel(incomingEdges)
                             e = incomingEdges(edge_idx);
                             sourceNode = e.SourceNode;
-                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
-                            if ~isempty(sourceIdx)
-                                sourceIndices(edge_idx) = sourceIdx;
-                                alphas(edge_idx) = e.Alfa;
+                            sourceIdx = sourceNode.ID;
+                            if ~isempty(sourceIdx) && sourceIdx > 0
+                                % Нормируем на знаменатель ИСТОЧНИКА (sourceIdx)
+                                delta_in(sourceIdx) = e.Alfa / sum_alpha_out_plus_one(sourceIdx);
                             end
                         end
-
-                        % Убираем нулевые индексы
-                        validIdx = sourceIndices > 0;
-                        sourceIndices = sourceIndices(validIdx);
-                        alphas = alphas(validIdx);
-
-                        % Заполняем delta_in
-                        for k = 1:numel(sourceIndices)
-                            delta_in(sourceIndices(k)) = alphas(k) / sum_alpha_out_plus_one(sourceIndices(k));
-                        end
                     end
-                    delta_in_cache{i,numBatches} = delta_in;
+                    delta_in_cache{i,batchIdx} = delta_in;
 
-                    % δ_Out для исходящих рёбер
                     delta_out = zeros(1, numNodes);
-
                     if ~isempty(outgoingEdges)
-                        targetIndices = zeros(1, numel(outgoingEdges));
-                        alphas = zeros(1, numel(outgoingEdges));
-
                         for edge_idx = 1:numel(outgoingEdges)
                             e = outgoingEdges(edge_idx);
                             targetNode = e.TargetNode;
-                            targetIdx = obj.NodeIndexMap(class(targetNode));
-                            if ~isempty(targetIdx)
-                                targetIndices(edge_idx) = targetIdx;
-                                alphas(edge_idx) = e.Alfa;
+                            targetIdx = targetNode.ID;
+                            if ~isempty(targetIdx) && targetIdx > 0
+                                delta_out(targetIdx) = e.Alfa / sum_alpha_out_plus_one(i);
                             end
                         end
-
-                        % Убираем нулевые индексы
-                        validIdx = targetIndices > 0;
-                        targetIndices = targetIndices(validIdx);
-                        alphas = alphas(validIdx);
-
-                        % Заполняем delta_out (используем предвычисленные суммы)
-                        for k = 1:numel(targetIndices)
-                            delta_out(targetIndices(k)) = alphas(k) / sum_alpha_out_plus_one(targetIndices(k));
-                        end
-
                     end
-                    delta_out_cache{i,numBatches} = delta_out;
+                    delta_out_cache{i,batchIdx} = delta_out;
                 end
 
                 for i = 1:numNodes
@@ -655,6 +615,7 @@ classdef Trainer < handle
 
                     % Прямой проход (использует исправленный Forward)
                     modelValues = obj.graph.GetCurrentResult(xMatrix);
+
                     % Здесь пока берется только одна белая вершина
                     targetValues = yMatrix.getRow(1);
 
@@ -723,13 +684,55 @@ classdef Trainer < handle
                         end
                     end
 
+                    % J_self для черных вершин
+                    J_self = zeros(1, numNodes);
+                    for b = obj.blackNodeIndices
+                        outgoingEdges = obj.outgoingEdgesCache{b};
+
+                        sum_alpha_out = 0;
+                        if ~isempty(outgoingEdges)
+                            sum_alpha_out = sum([outgoingEdges.Alfa]);
+                        end
+
+                        if sum_alpha_out == 0
+                            J_self(b) = 0;
+                            continue;
+                        end
+
+                        % Определяем G_In
+                        G_in = 0;
+                        incomingEdges = obj.incomingEdgesCache{b};
+                        for e_idx = 1:numel(incomingEdges)
+                            e = incomingEdges(e_idx);
+                            sourceNode = e.SourceNode;
+                            sourceIdx = sourceNode.ID;
+                            G_in = G_in + e.Alfa * modelValues(sourceIdx) + e.Beta;
+                        end
+
+                        sum_beta_out = 0;
+                        for e_idx = 1:numel(outgoingEdges)
+                            sum_beta_out = sum_beta_out + outgoingEdges(e_idx).Beta;
+                        end
+
+                        F_shadow = (G_in - sum_beta_out) / sum_alpha_out;
+
+                        F_b = modelValues(b);
+
+                        % Собственная невязка по производной
+                        J_self(b) = (F_b - F_shadow);
+                    end
+
                     J_total = zeros(1, numNodes);
                     J_total(obj.whiteNodeIndices) = J_white(obj.whiteNodeIndices);
 
+                    for b = obj.blackNodeIndices
+                        J_total(b) = 0.1 * J_self(b);
+                    end
+                    
+                    max_iterations = length(obj.blackNodeIndices) + 1;
+
                     A_in = eye(numNodes,numNodes);
                     A_out = eye(numNodes,numNodes);
-
-                    max_iterations = length(obj.blackNodeIndices) + 1;
 
                     for iter = 1:max_iterations
                         J_prev = J_total;
@@ -737,8 +740,9 @@ classdef Trainer < handle
                         updated = false;
 
                         for i = obj.blackNodeIndices
-                            delta_in = delta_in_cache{i,numBatches};
-                            delta_out = delta_out_cache{i,numBatches };
+                            delta_in = delta_in_cache{i,batchIdx};
+                            delta_out = delta_out_cache{i,batchIdx};
+
                             incomingNeighbors = obj.incomingNeighborsCache{i};
                             outgoingEdges = obj.outgoingEdgesCache{i}';
 
@@ -746,7 +750,7 @@ classdef Trainer < handle
                             sum_in = 0;
                             for neighbor = incomingNeighbors
                                 if ~isempty(neighbor)
-                                    neighborIdx = obj.NodeIndexMap(class(neighbor));
+                                    neighborIdx = neighbor.ID;
                                     if ~isempty(neighborIdx) && delta_in(neighborIdx) ~= 0
                                         if A_in(i, neighborIdx) == 0 && J_prev(neighborIdx) ~= 0
                                             sum_in = sum_in + delta_in(neighborIdx) * J_prev(neighborIdx);
@@ -760,7 +764,7 @@ classdef Trainer < handle
                             sum_out = 0;
                             for e = outgoingEdges
                                 targetNode = e.TargetNode;
-                                targetIdx = obj.NodeIndexMap(class(targetNode));
+                                targetIdx = targetNode.ID;
                                 if ~isempty(targetIdx) && delta_out(targetIdx) ~= 0
                                     if A_out(i, targetIdx) == 0 && J_prev(targetIdx) ~= 0
                                         sum_out = sum_out + delta_out(targetIdx) * J_prev(targetIdx);
@@ -769,7 +773,9 @@ classdef Trainer < handle
                                 end
                             end
 
-                            new_value = sum_in + sum_out;
+                            new_value = obj.TrainingOptions.Lambda_Self * J_self(i) ...
+                                + obj.TrainingOptions.Lambda_Struct * (sum_in + sum_out);
+
                             if new_value ~= 0 && new_value ~= J_new(i)
                                 J_new(i) = new_value;
                                 updated = true;
@@ -781,6 +787,32 @@ classdef Trainer < handle
                         if ~updated
                             break;
                         end
+                    end
+
+                    % --- Настройка ядровых функций (ITunableCoreF) ---
+                    % dJ/dC = J_total(i) / D(i,i), где D(i,i) = Σ(α_out + 1)
+                    % Не привязан к конкретным параметрам — работает с любой ITunableCoreF
+                    for i = 1:numNodes
+                        if J_total(i) == 0, continue; end
+
+                        nodeFunc = obj.nodes(i).getNodeFunction();
+                        if isempty(nodeFunc) || ~isa(nodeFunc, 'coreFunctions.ITunableCoreF')
+                            continue;
+                        end
+
+                        outgoingEdges = obj.outgoingEdgesCache{i};
+                        if ~isempty(outgoingEdges)
+                            denominator = 0;
+                            for e = outgoingEdges'
+                                denominator = denominator + e.Alfa + 1;
+                            end
+                        else
+                            denominator = 1;
+                        end
+
+                        dJ_dC = J_total(i) / denominator;
+                        nodeInputData = xMatrix.getRow(i);
+                        nodeFunc.TuneParameters(nodeInputData, dJ_dC);
                     end
 
                     % Вычисляем все производные в топологическом порядке
@@ -823,7 +855,7 @@ classdef Trainer < handle
                         for j = 1:numel(incomingEdges)
                             edge = incomingEdges(j);
                             sourceNode = edge.SourceNode;
-                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
+                            sourceIdx = sourceNode.ID;
 
                             if isempty(sourceIdx), continue; end
                             % Градиент для α
@@ -853,7 +885,7 @@ classdef Trainer < handle
                         end
                     end
 
-                    % Добавляем L2 регуляризацию (λ₁ в формуле 3.7)
+                    % Добавляем L2 регуляризацию (λ1 в формуле 3.7)
                     for i = 1:numNodes
                         % Регуляризация по gamma
                         batchGmGrad{i} = batchGmGrad{i} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).Gamma;
@@ -899,7 +931,7 @@ classdef Trainer < handle
                     obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i,batchIdx}.^2);
 
                     % Применение обновлений (формула 3.16)
-                    lr = obj.learningRate * obj.TrainingOptions.NodeSize(i);
+                    lr = obj.TrainingOptions.LearningRate * obj.TrainingOptions.NodeSize(i);
                     sqrtVAl = sqrt(obj.vAl{i} * vCorrFactor) + epsilon;
                     sqrtVBt = sqrt(obj.vBt{i} * vCorrFactor) + epsilon;
                     sqrtVGm = sqrt(obj.vGm{i} * vCorrFactor) + epsilon;
