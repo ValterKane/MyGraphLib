@@ -628,10 +628,10 @@ classdef GraphShell < handle
                     error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
                 end
 
-                dF_dbeta = (2 + alpha_e * dF_source_dbeta) / denominator;
+                dF_dbeta = (1 + alpha_e * dF_source_dbeta) / denominator;
 
             else
-                dF_dbeta = 2 + alpha_e * dF_source_dbeta;
+                dF_dbeta = 1 + alpha_e * dF_source_dbeta;
             end
             
         end
