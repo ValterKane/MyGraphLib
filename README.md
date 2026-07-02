@@ -120,7 +120,7 @@ MyGraphLib/
 
 Формула вершины (до применения активации):
 
-$$F_v = \sigma\!\left(\gamma_v \cdot f_v(x_v) \;+\!\! \sum_{u \in \text{In}(v)} \bigl(\alpha_{u \to v} \cdot F_u + \beta_{u \to v}\bigr)\right)$$
+$$F_v = \sigma\left(\gamma_v \cdot f_v(x_v) + \sum_{u \in \text{In}(v)} \bigl(\alpha_{u \to v} \cdot F_u + \beta_{u \to v}\bigr)\right)$$
 
 где σ — функция активации, f_v — ядровая функция, In(v) — входящие в v рёбра.
 
