@@ -1158,6 +1158,10 @@ classdef Trainer < handle
             savedTrainErrors = obj.trainErrors;
             savedTestErrors = obj.testErrors;
             savedErrorArray = obj.errorArray;
+            savedMAl = obj.mAl; savedVAl = obj.vAl;
+            savedMBt = obj.mBt; savedVBt = obj.vBt;
+            savedMGm = obj.mGm; savedVGm = obj.vGm;
+            savedT = obj.t;
 
             baselineError = obj.bestTestError;  % фиксированный порог для ВСЕХ кандидатов
             bestCandidateError = Inf;
@@ -1313,6 +1317,9 @@ classdef Trainer < handle
                             opts.StructInitAlpha, opts.StructInitBeta);
                 end
 
+                % Балансируем альфы под новую топологию (гарантия устойчивости)
+                candidateGraph.GenerateTopologyAwareAlpha();
+
                 % Проверяем устойчивость кандидата (условие 3.3 из рукописи)
                 [isStable, ~] = candidateGraph.checkStability();
                 if ~isStable
@@ -1336,6 +1343,21 @@ classdef Trainer < handle
 
                 candidateError = obj.QuickEvaluate(XDataTrain, YDataTrain, ...
                     XDataTest, YDataTest, opts.StructuralSearchEpochs);
+
+                % Проверяем, что новое ребро не вырождено (α,β ≈ 0 → ребро бесполезно)
+                if strcmp(mutation.type, 'add')
+                    [newAlpha, newBeta] = candidateGraph.getEdgeParams(mutation.src, mutation.dst);
+                elseif strcmp(mutation.type, 'reconnect')
+                    [newAlpha, newBeta] = candidateGraph.getEdgeParams(mutation.src2, mutation.dst2);
+                else
+                    newAlpha = 1; newBeta = 1;  % remove: проверка не нужна
+                end
+                if abs(newAlpha) < 1e-8 && abs(newBeta) < 1e-8
+                    fprintf('вырождено (α=%.2e, β=%.2e) — отклонён\n', newAlpha, newBeta);
+                    checkedEdges(cacheKey) = Inf;
+                    obj.rejectedEdges(end+1, :) = [mutation.src, mutation.dst];
+                    continue;
+                end
 
                 checkedEdges(cacheKey) = candidateError;
 
@@ -1395,7 +1417,16 @@ classdef Trainer < handle
             obj.trainErrors = savedTrainErrors;
             obj.testErrors = savedTestErrors;
             obj.errorArray = savedErrorArray;
-            obj.ResetTrainingState();
+            % Сбрасываем только кеши, сохраняя ADAM-моменты исходного графа
+            obj.incomingEdgesCache = {};
+            obj.outgoingEdgesCache = {};
+            obj.incomingNeighborsCache = {};
+            obj.whiteNodeIndices = [];
+            obj.blackNodeIndices = [];
+            obj.mAl = savedMAl; obj.vAl = savedVAl;
+            obj.mBt = savedMBt; obj.vBt = savedVBt;
+            obj.mGm = savedMGm; obj.vGm = savedVGm;
+            obj.t = savedT;
 
             % Применяем лучшую мутацию к реальному графу
             if ~isempty(bestMutation)

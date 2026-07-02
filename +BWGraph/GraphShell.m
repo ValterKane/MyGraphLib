@@ -225,7 +225,7 @@ classdef GraphShell < handle
 
         function GenerateTopologyAwareAlpha(obj)
             % Генерация α с учётом топологии. Гарантирует Σα_in(v) < 1+Σα_out(v) ∀v (3.3).
-            % Бюджет D(v) распределяется пропорционально случайным весам.
+            % Бюджет D(v) распределяется равномерно между входящими рёбрами.
             n = numel(obj.ListOfNodes);
             if n == 0, return; end
 
@@ -255,8 +255,7 @@ classdef GraphShell < handle
                     D_v = 1 + sum([outEdges.Alfa]);
                     budget = obj.SafetyFactor * D_v;
 
-                    weights = rand(1, nIn);
-                    weights = weights / sum(weights);
+                    weights = ones(1, nIn) / nIn;  % равномерное распределение
 
                     for j = 1:nIn
                         newAlpha = max(obj.MinAlpha, budget * weights(j));
