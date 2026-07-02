@@ -8,6 +8,7 @@ classdef Trainer < handle
         outgoingEdgesCache
         incomingNeighborsCache
         distancesCache
+        sccCache            % SCC-компоненты для δ-нормировки (цикл/DAG)
         edgeSources ;
         edgeTargets;
         edgeAlphas;
@@ -602,8 +603,11 @@ classdef Trainer < handle
                     obj.outgoingEdgesCache{i} = obj.nodes(i).getOutEdges();
                     obj.incomingNeighborsCache{i} = obj.graph.getIncomingNeighbors(obj.nodes(i));
                 end
+
+                % SCC-классификация для гибридной δ-нормировки
+                obj.sccCache = obj.computeSCC();
             end
-            
+
             % Инициализация моментов ADAM
             if isempty(obj.mAl)
                 obj.mAl = cell(numNodes, 1);
@@ -690,8 +694,12 @@ classdef Trainer < handle
                             sourceNode = e.SourceNode;
                             sourceIdx = sourceNode.ID;
                             if ~isempty(sourceIdx) && sourceIdx > 0
-                                % Нормируем на знаменатель ИСТОЧНИКА (sourceIdx)
-                                delta_in(sourceIdx) = e.Alfa / sum_alpha_out_plus_one(sourceIdx);
+                                % Гибрид: D(source) для циклов, D(target) для DAG
+                                if obj.sccCache(sourceIdx) == obj.sccCache(i)
+                                    delta_in(sourceIdx) = e.Alfa / sum_alpha_out_plus_one(sourceIdx);
+                                else
+                                    delta_in(sourceIdx) = e.Alfa / sum_alpha_out_plus_one(i);
+                                end
                             end
                         end
                     end
@@ -704,7 +712,12 @@ classdef Trainer < handle
                             targetNode = e.TargetNode;
                             targetIdx = targetNode.ID;
                             if ~isempty(targetIdx) && targetIdx > 0
-                                delta_out(targetIdx) = e.Alfa / sum_alpha_out_plus_one(i);
+                                % Гибрид: D(source) для циклов, D(target) для DAG
+                                if obj.sccCache(i) == obj.sccCache(targetIdx)
+                                    delta_out(targetIdx) = e.Alfa / sum_alpha_out_plus_one(i);
+                                else
+                                    delta_out(targetIdx) = e.Alfa / sum_alpha_out_plus_one(targetIdx);
+                                end
                             end
                         end
                     end
@@ -1499,6 +1512,7 @@ classdef Trainer < handle
             obj.incomingEdgesCache = {};
             obj.outgoingEdgesCache = {};
             obj.incomingNeighborsCache = {};
+            obj.sccCache = [];
             obj.mAl = {};
             obj.vAl = {};
             obj.mBt = {};
@@ -1516,6 +1530,7 @@ classdef Trainer < handle
             obj.incomingEdgesCache = {};
             obj.outgoingEdgesCache = {};
             obj.incomingNeighborsCache = {};
+            obj.sccCache = [];
             obj.whiteNodeIndices = [];
             obj.blackNodeIndices = [];
 
@@ -1591,6 +1606,29 @@ classdef Trainer < handle
                     text(ax, j, i, lbl, 'HorizontalAlignment', 'center', ...
                         'Color', c, 'FontSize', 14, 'FontWeight', 'bold');
                 end
+            end
+        end
+
+        function sccIds = computeSCC(obj)
+            % SCC-классификация вершин для гибридной δ-нормировки.
+            % Возвращает массив sccIds длины numNodes: вершины с одинаковым
+            % sccIds находятся в одной компоненте сильной связности.
+            % Внутри SCC → D(source) (симметрия), между SCC → D(target) (цепное правило).
+            numNodes = numel(obj.nodes);
+            s = [];
+            t = [];
+            for i = 1:numNodes
+                edges = obj.outgoingEdgesCache{i};
+                for j = 1:numel(edges)
+                    s(end+1) = i;
+                    t(end+1) = edges(j).TargetNode.ID;
+                end
+            end
+            if isempty(s)
+                sccIds = 1:numNodes;
+            else
+                G = digraph(s, t);
+                sccIds = conncomp(G, 'Type', 'strong');
             end
         end
     end
