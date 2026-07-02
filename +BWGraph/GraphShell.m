@@ -1167,7 +1167,7 @@ classdef GraphShell < handle
                     end
                 end
 
-                topologicalOrder = [nodeIdx, topologicalOrder];
+                topologicalOrder = [topologicalOrder, nodeIdx];
             end
 
             % Обход всех вершин
