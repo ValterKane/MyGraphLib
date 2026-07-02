@@ -25,9 +25,7 @@ nodeC.addEdge(nodeA);
 NodeWeight = [1 0.5 0.5]; % Весовые коэффициенты вершин
 
 % Создаем графовую модель
-modelShell = GraphShell(alfaGen,betaGen,NodeWeight,nodeA,nodeB,nodeC);
-% Отрисовать граф
-modelShell.DrawGraph_New('Модель нагрева');
+modelShell = GraphShell(betaGen,NodeWeight,nodeA,nodeB,nodeC);
 
 % Генерация данных и подготовка подвыборок (синтетика)
 % Генерация данных с учетом индивидуальных характеристик вершин

@@ -1,7 +1,6 @@
 
-%% Fast Start — ExpHeatRealData с настраиваемыми ядровыми функциями
-% Использует Heating2DTunableModel вместо Heating2DModel
-% Параметры h и alpha настраиваются автоматически через Trainer.Compute_V5
+%% ExpHeatRealData + Structural Search
+% Копия ExpHeatRealData.m с включенной оптимизацией топологии
 clear; clc; close all;
 rng(1111);
 
@@ -10,42 +9,42 @@ import BWGraph.CustomMatrix.*;
 import BWGraph.RandomGenerator.*;
 import BWGraph.Trainer.*;
 
-% Ядровые функции — Heating2DTunableModel (h и alpha обучаемые)
-% Параметры: h, nx, ny, lambda, alpha, Lx, Ly, T0, nt, learningRate
-HeatBC_1 = coreFunctions.Heating2DTunableModel(200, 20, 20, 70, 1.5e-5, 0.3, 0.360, 30, 10, 0.01);
-HeatBC_2 = coreFunctions.Heating2DTunableModel(300, 20, 20, 60, 1.0e-5, 0.3, 0.360, 400, 10, 0.01);
-HeatBC_3 = coreFunctions.Heating2DTunableModel(400, 20, 20, 50, 0.5e-5, 0.3, 0.360, 700, 10, 0.01);
+HeatBC_1 = coreFunctions.Heating2DModel(200, 20, 20, 70, 1.5e-5, 0.3, 0.360, 30, 10);
+HeatBC_2 = coreFunctions.Heating2DModel(300, 20, 20, 60, 1.0e-5, 0.3, 0.360, 400, 10);
+HeatBC_3 = coreFunctions.Heating2DModel(400, 20, 20, 50, 0.5e-5, 0.3, 0.360, 700, 10);
 
-alfaGen = FullRandomAlfaGen(1, 1e1);
-betaGen = FullRandomBetaGen(1, 1e2);
+alfaGen = FullRandomAlfaGen(1,1e1);
+betaGen = FullRandomBetaGen(1,1e2);
 
-FirstZone = Node(1, 30, 'Black', HeatBC_1, 'linear');
-SecondZone = Node(2, 30, 'Black', HeatBC_2, 'linear');
-ThirdZone = Node(3, 30, 'White', HeatBC_3, 'linear');
+FirstZone = Node(1, 30,'Black',HeatBC_1, 'linear');
+SecondZone = Node(2, 30,'Black',HeatBC_2, 'linear');
+ThirdZone = Node(3, 30,'White',HeatBC_3, 'linear');
 
 FirstZone.addEdge(SecondZone);
+SecondZone.addEdge(FirstZone);
+
 SecondZone.addEdge(ThirdZone);
+ThirdZone.addEdge(SecondZone);
 
 NodeWeight = [0.5 0.5 1];
 
-modelShell = GraphShell(betaGen, NodeWeight, FirstZone, SecondZone, ThirdZone);
+modelShell = GraphShell(alfaGen,betaGen,NodeWeight, FirstZone, SecondZone, ThirdZone);
 
 if ~exist("data", 'var')
     data = readtable("\Новые данные\06.05.2026.xlsx");
 end
-
-%% Подготовка данных
+%%
 totalBatch = 100;
 initial = 1;
 
-t1 = table2array(data(initial:totalBatch, "t12_H").*3600) + table2array(data(initial:totalBatch, "t12_M").*60);
-t2 = table2array(data(initial:totalBatch, "t34_H").*3600) + table2array(data(initial:totalBatch, "t34_M").*60);
-t3 = table2array(data(initial:totalBatch, "t56_H").*3600) + table2array(data(initial:totalBatch, "t56_M").*60);
+t1 = table2array(data(initial:totalBatch,"t12_H").*3600) + table2array(data(initial:totalBatch,"t12_M").*60);
+t2 = table2array(data(initial:totalBatch,"t34_H").*3600) + table2array(data(initial:totalBatch,"t34_M").*60);
+t3 = table2array(data(initial:totalBatch,"t56_H").*3600) + table2array(data(initial:totalBatch,"t56_M").*60);
 
-T1 = data{initial:totalBatch, "T12_Avg"};
-T2 = data{initial:totalBatch, "T34_Avg"};
-T3 = data{initial:totalBatch, "T56_Avg"};
-T_y = data{initial:totalBatch, "T_Res_Max"};
+T1 = data{initial:totalBatch,"T12_Avg"};
+T2 = data{initial:totalBatch,"T34_Avg"};
+T3 = data{initial:totalBatch,"T56_Avg"};
+T_y = data{initial:totalBatch,"T_Res_Max"};
 
 fprintf('Новый размер выборки: %d\n', totalBatch);
 
@@ -56,97 +55,102 @@ data_for_three = [t3, T3];
 XData_for_gb = [t1, t2, t3, T1, T2, T3];
 YData_for_gb = T_y;
 
-XData = repmat(BWMatrix(), (totalBatch - initial) + 1, 1);
-YData = repmat(BWMatrix(), (totalBatch - initial) + 1, 1);
+XData = repmat(BWMatrix(), (totalBatch-initial)+1, 1);
+YData = repmat(BWMatrix(), (totalBatch-initial)+1, 1);
 
-for i = 1:(totalBatch - initial) + 1
-    XData(i) = XData(i).addRow(data_for_one(i, :));
-    XData(i) = XData(i).addRow(data_for_two(i, :));
-    XData(i) = XData(i).addRow(data_for_three(i, :));
+for i = 1:(totalBatch-initial)+1
+    XData(i) = XData(i).addRow(data_for_one(i,:));
+    XData(i) = XData(i).addRow(data_for_two(i,:));
+    XData(i) = XData(i).addRow(data_for_three(i,:));
 end
 
-for i = 1:(totalBatch - initial) + 1
-    YData(i) = YData(i).addRow(T_y(i, :));
+for i = 1:(totalBatch-initial)+1
+    YData(i) = YData(i).addRow(T_y(i,:));
 end
 
-indices = randperm((totalBatch - initial) + 1);
-splitPoint = round(0.7 * (totalBatch - initial) + 1);
+indices = randperm((totalBatch-initial)+1);
+splitPoint = round(0.7 * (totalBatch-initial)+1);
 idx_train = indices(1:splitPoint);
-idx_test = indices(splitPoint + 1:end);
+idx_test = indices(splitPoint+1:end);
 
 XDataTrain = XData(idx_train);
 YDataTrain = YData(idx_train);
 XDataTest = XData(idx_test);
 YDataTest = YData(idx_test);
 
-XTrain_GB = XData_for_gb(idx_train, :);
+XTrain_GB = XData_for_gb(idx_train,:);
 yTrain_GB = YData_for_gb(idx_train);
-XTest_GB = XData_for_gb(idx_test, :);
+XTest_GB = XData_for_gb(idx_test,:);
 yTest_GB = YData_for_gb(idx_test);
 
 %% Отрисовать граф
-modelShell.DrawGraph_New('Модель нагрева (настраиваемые h, alpha)');
+fprintf('\nНачальная топология: %d рёбер\n', modelShell.getTotalEdgeCount());
+modelShell.DrawGraph_New('Модель нагрева (до структурного поиска)');
 
-%% Настройка учителя
+%% Настройка учителя + СТРУКТУРНЫЙ ПОИСК
+fprintf('\n===== Запуск со структурным поиском =====\n');
+
 trainerOptions = TrainingOptions( ...
     "LearningRate", 0.01, ...
     "Beta1", 0.6, ...
     "Beta2", 0.8, ...
     "Eps", 1e-8, ...
-    "NodeSize", [1 1 1], ...
+    "NodeSize", [1 1 1 1], ...
     "Epoches", 500, ...
-    "ClipUp", 1e18, ...
-    "ClipDown", -1e18, ...
-    "TargetError", 10, ...
+    "AutoCalibrateClip",true,...
+    "ClipPercentile", 95, ...
+    "TargetError", 12, ...
     "Lambda_Agg", 0, ...
-    "Lambda_Alph", 0.1, ...
-    "Lambda_Beta", 0.1, ...
-    "Lambda_Gamma", 0.1, ...
-    "Lambda_Self", 0.1, ...
-    "Lambda_Struct", 0.9, ...
-    "ErrorMetric", 'mae', ...
-    "LossFunction", 'mae', ...
-    "TargetNodeIndices", [], ...
-    "BatchSize", 1);
+    "Lambda_Alph", 0.7, ...
+    "Lambda_Beta", 0.2, ...
+    "Lambda_Gamma",0.5, ...
+    "Lambda_Self", 0.4, ...
+    "Lambda_Struct", 0.6, ...
+    "ErrorMetric",'mae', ...
+    "LossFunction",'mae', ...
+    "TargetNodeIndices",[], ...
+    "BatchSize", 1, ...
+    ... % === Параметры структурного поиска ===
+    "EnableStructuralSearch", true, ...
+    "StructuralSearchInterval", 6, ...   % Каждые 10 эпох
+    "StructuralSearchCandidates", 5, ...   % 5 кандидатов-мутаций
+    "StructuralSearchEpochs", 5);          % 5 эпох быстрой настройки
 
 trainer = Trainer(modelShell, trainerOptions);
-
-%% Вывод начальных параметров ядровых функций
-fprintf('\n========== Начальные параметры Heating2DTunableModel ==========\n');
-params1 = HeatBC_1.GetTunableParameters();
-params2 = HeatBC_2.GetTunableParameters();
-params3 = HeatBC_3.GetTunableParameters();
-fprintf('HeatBC_1: h=%.4f, alpha=%.2e\n', params1.h, params1.alpha);
-fprintf('HeatBC_2: h=%.4f, alpha=%.2e\n', params2.h, params2.alpha);
-fprintf('HeatBC_3: h=%.4f, alpha=%.2e\n', params3.h, params3.alpha);
-fprintf('===============================================================\n\n');
-
-%% Запуск процесса обучения
+%% Запуск процесса
 trainer.Train(XDataTrain, YDataTrain, XDataTest, YDataTest);
 
-%% Вывод финальных параметров ядровых функций
-fprintf('\n========== Финальные параметры Heating2DTunableModel ==========\n');
-params1 = HeatBC_1.GetTunableParameters();
-params2 = HeatBC_2.GetTunableParameters();
-params3 = HeatBC_3.GetTunableParameters();
-fprintf('HeatBC_1: h=%.4f, alpha=%.2e\n', params1.h, params1.alpha);
-fprintf('HeatBC_2: h=%.4f, alpha=%.2e\n', params2.h, params2.alpha);
-fprintf('HeatBC_3: h=%.4f, alpha=%.2e\n', params3.h, params3.alpha);
-fprintf('===============================================================\n\n');
+fprintf('\nИтоговая топология: %d рёбер\n', modelShell.getTotalEdgeCount());
+ex = modelShell.getExistingEdges();
+for i = 1:size(ex,1)
+    fprintf('  Ребро %d -> %d\n', ex(i,1), ex(i,2));
+end
 
-%% Предсказание на тестовой выборке
-numTestSamples = size(XDataTest, 1);
+%%
+numTestSamples = size(XDataTest,1);
 
 for i = 1:numTestSamples
     act(i) = YDataTest(i).getRow(1);
     result = modelShell.GetCurrentResult(XDataTest(i));
     predModel(i) = result(3);
 end
+%%
 
-%% Чек модели
-diagnostics_BW = plotHeatingPrediction(act, predModel);
+ValidMatrix = BWMatrix();
+ValidMatrix = ValidMatrix.addRow([10000, 1000]);
+ValidMatrix = ValidMatrix.addRow([4000, 1250]);
+ValidMatrix = ValidMatrix.addRow([6000, 1100]);
 
-%% Градиентный бустинг для сравнения
+
+result = modelShell.GetCurrentResult(ValidMatrix);
+prediction = result(3);
+prediction_up = prediction + 18.5;
+prediction_down = prediction - 18.5;
+
+fprintf("Прогноз: %2f, Верх: %2f, Низ: %2f",prediction, prediction_up, prediction_down);
+
+%%
+umTrees = 6;
 gbModel = fitrensemble(XTrain_GB, yTrain_GB, ...
     'Method', 'LSBoost', ...
     'NumLearningCycles', 100, ...
@@ -157,7 +161,7 @@ yPredGB = predict(gbModel, XTest_GB);
 
 mseGB = mean((yPredGB - yTest_GB).^2);
 r2GB = 1 - sum((yTest_GB - yPredGB).^2) / sum((yTest_GB - mean(yTest_GB)).^2);
-fprintf('Градиентный бустинг - MSE: %.4f, R2: %.4f\n', mseGB, r2GB);
+fprintf('Градиентный бустинг - MSE: %.4f, R²: %.4f\n', mseGB, r2GB);
 
 scatter(yTest_GB, yPredGB);
 hold on;
@@ -167,12 +171,91 @@ ylabel('Предсказания GB');
 title('Градиентный бустинг');
 grid on;
 
-%% Чек LSBoost
+%% Чек модели
+diagnostics_BW = plotHeatingPrediction(act,predModel);
+%% Чек 3Heat
+diagnostics_3Heat = plotHeatingPrediction(act,res3);
+%% Чек LSBoost (xGBoost на деревьях с МНК)
 diagnostics_LSBoost = plotHeatingPrediction(act, yPredGB);
 
-%% ===== Вспомогательные функции =====
+%% Новые данные для валидации изменения
 
+% Гиперпараметры
+totalBatch = 300;
+initial = 150;
+
+t1 = table2array(data1(initial:totalBatch,"t12_H").*120) + table2array(data1(initial:totalBatch,"t12_M").*60);
+t2 = table2array(data1(initial:totalBatch,"t12_H").*120) + table2array(data1(initial:totalBatch,"t12_M").*60);
+t3 = table2array(data1(initial:totalBatch,"t12_H").*120) + table2array(data1(initial:totalBatch,"t12_M").*60);
+
+T1 = data1{initial:totalBatch,"T12_Avg"};
+T2 = data1{initial:totalBatch,"T34_Avg"};
+T3 = data1{initial:totalBatch,"T56_Avg"};
+T_y = data1{initial:totalBatch,"T_res_max"};
+
+fprintf('Новый размер выборки: %d\n', totalBatch);
+
+data_for_one = [t1, T1];
+data_for_two = [t2, T2];
+data_for_three = [t3, T3];
+
+XData_for_gb = [t1, t2, t3, T1,T2,T3];
+YData_for_gb = T_y;
+
+XData = repmat(BWMatrix(), (totalBatch-initial)+1, 1);
+YData = repmat(BWMatrix(), (totalBatch-initial)+1, 1);
+
+for i = 1:(totalBatch-initial)+1
+    XData(i) = XData(i).addRow(data_for_one(i,:));
+    XData(i) = XData(i).addRow(data_for_two(i,:));
+    XData(i) = XData(i).addRow(data_for_three(i,:));
+end
+
+for i = 1:(totalBatch-initial)+1
+    YData(i) = YData(i).addRow(T_y(i,:));
+end
+
+indices = randperm((totalBatch-initial)+1);
+splitPoint = round(0.7 * (totalBatch-initial)+1);
+trainIndices = indices(1:splitPoint);
+testIndices = indices(splitPoint+1:end);
+
+XDataTrain = XData(trainIndices);
+YDataTrain = YData(trainIndices);
+XDataTest = XData(testIndices);
+YDataTest = YData(testIndices);
+
+XTrain_GB = XData_for_gb(trainIndices,:);
+yTrain_GB = YData_for_gb(trainIndices);
+XTest_GB = XData_for_gb(testIndices,:);
+yTest_GB = YData_for_gb(testIndices);
+
+numTestSamples = size(XDataTest,1);
+
+for i = 1:numTestSamples
+    act(i) = YDataTest(i).getRow(1);
+    result = modelShell.GetCurrentResult(XDataTest(i));
+    predModel(i) = result(3);
+    model1 = coreFunctions.Heating2DModel(30, 21, 21, 50, 1.5e-5, 0.3, 0.360, 30, 10);
+    res1 = model1.CalcCoreFunction(XDataTest(i).getRow(1));
+    model2 = coreFunctions.Heating2DModel(60, 21, 21, 60, 1.5e-5, 0.3, 0.360, res1, 10);
+    res2 = model2.CalcCoreFunction(XDataTest(i).getRow(2));
+    model3 = coreFunctions.Heating2DModel(90, 21, 21, 70, 1.5e-5, 0.3, 0.360, res2, 10);
+    res3(i) = HeatBC_3.CalcCoreFunction(XDataTest(i).getRow(3));
+end
+
+yPredGB = predict(gbModel, XTest_GB);
+
+%% Чек модели
+diagnostics_BW_new = plotHeatingPrediction(act,predModel);
+%% Чек 3Heat
+diagnostics_3Heat_new = plotHeatingPrediction(act,res3);
+%% Чек LSBoost (xGBoost на деревьях с МНК)
+diagnostics_LSBoost_new = plotHeatingPrediction(act, yPredGB);
+
+%%
 function diagnostics = plotHeatingPrediction(y_true, y_pred, time_vector, model_name)
+% (функция без изменений из исходного скрипта)
     if nargin < 3
         time_vector = 1:length(y_true);
     end
@@ -283,7 +366,7 @@ function diagnostics = plotHeatingPrediction(y_true, y_pred, time_vector, model_
     diagnostics = calculateMetrics(y_true, y_pred);
 
     fprintf('\n========== МЕТРИКИ МОДЕЛИ: %s ==========\n', model_name);
-    fprintf('R2 (коэффициент детерминации): %.4f\n', diagnostics.R2);
+    fprintf('R² (коэффициент детерминации): %.4f\n', diagnostics.R2);
     fprintf('MAE (средняя абсолютная ошибка): %.2f °C\n', diagnostics.MAE);
     fprintf('RMSE (среднеквадратичная ошибка): %.2f °C\n', diagnostics.RMSE);
     fprintf('MAPE (средняя относительная ошибка): %.2f %%\n', diagnostics.MAPE);
@@ -334,22 +417,26 @@ function printDiagnostics(diagnostics)
     fprintf('========== ДИАГНОСТИЧЕСКИЕ ВЫВОДЫ ==========\n');
 
     if diagnostics.R2 < 0
-        fprintf('ПРОБЛЕМА: R2 = %.2f (отрицательный!)\n', diagnostics.R2);
+        fprintf('ПРОБЛЕМА: R² = %.2f (отрицательный!)\n', diagnostics.R2);
         fprintf('   Модель работает ХУЖЕ, чем просто предсказание среднего.\n');
+        if diagnostics.R2 < -0.1
+            fprintf('   Возможно, модель предсказывает в противофазе с реальностью.\n');
+        end
     elseif diagnostics.R2 < 0.3
-        fprintf('R2 = %.2f (низкий)\n', diagnostics.R2);
+        fprintf('R² = %.2f (низкий)\n', diagnostics.R2);
         fprintf('   Модель объясняет только %.0f%% вариации данных.\n', diagnostics.R2*100);
     elseif diagnostics.R2 < 0.7
-        fprintf('R2 = %.2f (средний)\n', diagnostics.R2);
+        fprintf('R² = %.2f (средний)\n', diagnostics.R2);
         fprintf('   Модель объясняет %.0f%% вариации данных.\n', diagnostics.R2*100);
     else
-        fprintf('R2 = %.2f (отличный!)\n', diagnostics.R2);
+        fprintf('R² = %.2f (отличный!)\n', diagnostics.R2);
     end
 
     rmse_std_ratio = diagnostics.RMSE / diagnostics.y_std;
     if rmse_std_ratio > 1
         fprintf('RMSE (%.2f) БОЛЬШЕ стандартного отклонения (%.2f)\n', ...
                 diagnostics.RMSE, diagnostics.y_std);
+        fprintf('   Это объясняет низкий R².\n');
     elseif rmse_std_ratio > 0.7
         fprintf('RMSE составляет %.0f%% от стандартного отклонения\n', rmse_std_ratio*100);
     else
@@ -359,17 +446,19 @@ function printDiagnostics(diagnostics)
     if diagnostics.MAE > 0.2 * diagnostics.y_range
         fprintf('MAE (%.2f) составляет >20%% от размаха данных (%.2f)\n', ...
                 diagnostics.MAE, diagnostics.y_range);
+        fprintf('   Это большая относительная ошибка.\n');
     end
 
-    fprintf('\nРЕКОМЕНДАЦИИ:\n');
+    fprintf('\n🔍 РЕКОМЕНДАЦИИ:\n');
     if diagnostics.R2 < 0
         fprintf('   - Проверьте, нет ли перепутанных меток (переменных)\n');
         fprintf('   - Проверьте выбросы в данных\n');
+        fprintf('   - Попробуйте инвертировать предсказания для теста\n');
     elseif diagnostics.R2 < 0.3
         fprintf('   - Добавьте больше признаков (историю нагрева)\n');
-        fprintf('   - Проверьте лаги\n');
-        fprintf('   - Попробуйте другую модель\n');
+        fprintf('   - Проверьте лаги (возможно, температура зависит от предыдущих значений)\n');
+        fprintf('   - Попробуйте другую модель (Random Forest, XGBoost)\n');
     end
 
-    fprintf('==============================================\n');
+     fprintf('==============================================\n');
 end

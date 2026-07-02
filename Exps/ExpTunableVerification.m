@@ -96,7 +96,7 @@ nodeC_fix = Node(3, 1, 'Black', HeatFix_3, 'linear');
 nodeB_fix.addEdge(nodeA_fix);
 nodeC_fix.addEdge(nodeA_fix);
 
-modelShell_fix = GraphShell(alfaGen, betaGen, [1 0.5 0.5], nodeA_fix, nodeB_fix, nodeC_fix);
+modelShell_fix = GraphShell(betaGen, [1 0.5 0.5], nodeA_fix, nodeB_fix, nodeC_fix);
 
 trainerOpts = TrainingOptions(...
     "LearningRate", 0.01, "Beta1", 0.9, "Beta2", 0.999, "Eps", 1e-8, ...
@@ -162,7 +162,7 @@ trainerOpts = TrainingOptions(...
     "ErrorMetric", 'mae', "LossFunction", 'mse', ...
     "TargetNodeIndices", [], "BatchSize", 1);
 
-modelShell_tune = GraphShell(alfaGen, betaGen, [1 0.5 0.5], nodeA_tune, nodeB_tune, nodeC_tune);
+modelShell_tune = GraphShell(betaGen, [1 0.5 0.5], nodeA_tune, nodeB_tune, nodeC_tune);
 
 trainer_tune = Trainer(modelShell_tune, trainerOpts);
 tic;

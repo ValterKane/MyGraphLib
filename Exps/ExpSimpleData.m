@@ -24,7 +24,7 @@ NodeSize = 1.0; % Коэффициенты
 NodeWeight = 1.0; % Весовые коэффициенты вершин
 
 % Создаем графовую модель
-modelShell = GraphShell(alfaGen, betaGen, node1);
+modelShell = GraphShell(betaGen, node1);
 
 % Создаем входные данные
 % Генерация данных с учетом индивидуальных характеристик вершин

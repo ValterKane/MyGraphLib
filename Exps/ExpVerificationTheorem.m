@@ -17,7 +17,7 @@ nodeC = Node(3, 1,'Black',HeatBC,'linear');
 
 % nodeA.addEdge(nodeC);
 % nodeA.addEdge(nodeB);
-% 
+
 nodeB.addEdge(nodeA);
 nodeC.addEdge(nodeA);
 nodeC.addEdge(nodeB);
@@ -28,7 +28,7 @@ NodeWeight = [1 0.5 0.5]; % Весовые коэффициенты вершин
 % Создаем графовую модель
 modelShell = GraphShell(alfaGen,betaGen,NodeWeight,nodeA,nodeB,nodeC);
 % Отрисовать граф
-modelShell.DrawGraph_New('Модель нагрева');
+modelShell.DrawGraph_New('Модель численной верифиакции');
 
 % Генерация данных и подготовка подвыборок (синтетика)
 % Генерация данных с учетом индивидуальных характеристик вершин
@@ -284,6 +284,12 @@ for j = 1:nTest
     XDataNew(j) = XDataNew(j).addRow([t1; i1]);
     XDataNew(j) = XDataNew(j).addRow([t2; i2]);
     XDataNew(j) = XDataNew(j).addRow([t3; i3]);
+    inputParams_for_v1_new = [t1; i1];
+    inputParams_for_v2_new = [t2; i2];
+    inputParams_for_v3_new = [t3; i3];
+    TavgValues(j) = HeatBC.CalcCoreFunction(inputParams_for_v1_new) + ...
+        0.1 * HeatBC.CalcCoreFunction(inputParams_for_v2_new) + ...
+        0.15 * HeatBC.CalcCoreFunction(inputParams_for_v3_new);
 end
 
 % C_bw — те же (вычислены один раз шагом 4)
@@ -301,8 +307,143 @@ end
 
 J_b_new_pred = J_w_new * C_bw';
 
-fprintf('\n========== НЕЗАВИСИМОСТЬ C_{b→w} ОТ ДАННЫХ ==========\n');
-fprintf('C_{b→w} = [(I - M)^{-1}]_{b,w} — зависит ТОЛЬКО от {α_e}.\n');
-fprintf('Вычислен один раз на обученных α, переиспользован на НОВЫХ данных.\n');
-fprintf('Новые J_w → J_b_pred = C · J_w_new без пересчёта M.\n');
-fprintf('Свойство (iii) теоремы подтверждено: C_{b→w} не зависит от X.\n');
+%% ===== 6. ПРОВЕРКА ДЕКОМПОЗИЦИИ НА НОВЫХ ДАННЫХ =====
+fprintf('\n========== ПРОВЕРКА НА НОВЫХ ДАННЫХ ==========\n');
+
+J_w_new_full = zeros(nTest, numW);
+J_b_struct_new = zeros(nTest, numB);
+J_b_dec_new = zeros(nTest, numB);
+maxRelErr_new = 0;
+
+for j = 1:nTest
+    F_new = modelShell.GetCurrentResult(XDataNew(j));
+
+    % Синтетический Tavg для нового сэмпла
+    t1_n = XDataNew(j).getRow(1); t1_n = t1_n(1);
+    t2_n = XDataNew(j).getRow(2); t2_n = t2_n(1);
+    t3_n = XDataNew(j).getRow(3); t3_n = t3_n(1);
+    i1_n = XDataNew(j).getRow(1); i1_n = i1_n(2);
+    i2_n = XDataNew(j).getRow(2); i2_n = i2_n(2);
+    i3_n = XDataNew(j).getRow(3); i3_n = i3_n(2);
+
+    Y_true = HeatBC.CalcCoreFunction([t1_n; i1_n]) + ...
+        0.1 * HeatBC.CalcCoreFunction([t2_n; i2_n]) + ...
+        0.15 * HeatBC.CalcCoreFunction([t3_n; i3_n]);
+
+    % J_w для белых вершин
+    for wi = 1:numW
+        J_w_new_full(j, wi) = (F_new(whiteIdx(wi)) - Y_true)^2;
+    end
+
+    % Структурная J_b через ряд Неймана: J = M·J + J0
+    J0 = zeros(numNodes, 1);
+    for wi = 1:numW
+        J0(whiteIdx(wi)) = J_w_new_full(j, wi);
+    end
+
+    J_iter = J0;
+    for it = 1:100
+        J_next = M * J_iter + J0;
+        if norm(J_next - J_iter, inf) < 1e-15, break; end
+        J_iter = J_next;
+    end
+
+    for bi = 1:numB
+        J_b_struct_new(j, bi) = J_iter(blackIdx(bi));
+    end
+
+    % J_b через декомпозицию: C_{b→w} · J_w
+    for bi = 1:numB
+        J_b_dec_new(j, bi) = C_bw(bi, :) * J_w_new_full(j, :)';
+    end
+
+    % Погрешность
+    for bi = 1:numB
+        relErr = abs(J_b_struct_new(j, bi) - J_b_dec_new(j, bi)) / (abs(J_b_struct_new(j, bi)) + 1e-15);
+        maxRelErr_new = max(maxRelErr_new, relErr);
+    end
+
+    % Вывод первых 5 сэмплов (как в анализе на тестовых)
+    if j <= 5
+        for bi = 1:numB
+            relErr = abs(J_b_struct_new(j, bi) - J_b_dec_new(j, bi)) / (abs(J_b_struct_new(j, bi)) + 1e-15);
+            fprintf('Сэмпл%d Чёрн%d | J_struct=% .6e | C·J_w=% .6e | |Δ|=% .2e | rel=% .2e\n', ...
+                j, blackIdx(bi), J_b_struct_new(j, bi), J_b_dec_new(j, bi), ...
+                abs(J_b_struct_new(j, bi) - J_b_dec_new(j, bi)), relErr);
+        end
+    end
+end
+
+fprintf('Максимальная относительная погрешность на НОВЫХ данных: %.2e\n', maxRelErr_new);
+if maxRelErr_new < 1e-12
+    fprintf('РЕЗУЛЬТАТ: Декомпозиция подтверждена на новых данных (МАШИННАЯ ТОЧНОСТЬ).\n');
+elseif maxRelErr_new < 1e-6
+    fprintf('РЕЗУЛЬТАТ: Декомпозиция подтверждена на новых данных (высокая точность).\n');
+else
+    fprintf('РЕЗУЛЬТАТ: Декомпозиция НЕ подтверждена на новых данных.\n');
+end
+fprintf('C_{b→w} = [(I - M)^{-1}]_{b,w} не зависит от X — зависит ТОЛЬКО от {α_e}.\n\n');
+
+%% ===== 7. ГРАФИКИ (Ч/Б без полутонов) =====
+figure('Position', [100, 100, 1400, 950]);
+
+% Разные маркеры для struct и dec, чтобы различать серии
+markers_struct = {'o', 's', 'd'};
+markers_dec   = {'^', 'v', 'p'};
+
+% 1. J_b_struct vs J_b_dec (тестовые)
+subplot(4,1,1); hold on;
+for bi = 1:numB
+    plot(1:nTest, J_b_struct(:, bi), [markers_struct{bi} '-'], 'Color', 'k', 'LineWidth', 1.5, ...
+        'MarkerFaceColor', 'k', 'DisplayName', sprintf('J_{struct}^{ч%d}', blackIdx(bi)));
+    plot(1:nTest, J_b_dec(:, bi), [markers_dec{bi} '--'], 'Color', 'k', 'LineWidth', 1.5, ...
+        'DisplayName', sprintf('J_{dec}^{ч%d}', blackIdx(bi)));
+end
+hold off; xlabel('Сэмпл', 'FontSize', 14); ylabel('J_b', 'FontSize', 14);
+title('Декомпозиция J_b (тестовые данные)', 'FontSize', 14);
+legend('Location','best', 'FontSize', 14); grid on;
+set(gca, 'FontSize', 14);
+
+% 2. Относительная погрешность (тестовые)
+subplot(4,1,2); hold on;
+for bi = 1:numB
+    relErrVec = abs(J_b_struct(:, bi) - J_b_dec(:, bi)) ./ (abs(J_b_struct(:, bi)) + 1e-15);
+    semilogy(1:nTest, relErrVec, [markers_struct{bi} '-'], 'Color', 'k', 'LineWidth', 1.5, ...
+        'MarkerFaceColor', 'k', 'DisplayName', sprintf('Чёрн%d', blackIdx(bi)));
+end
+hold off; xlabel('Сэмпл', 'FontSize', 14); ylabel('Отн. погрешность', 'FontSize', 14);
+title('Погрешность (тестовые данные)', 'FontSize', 14);
+legend('Location','best', 'FontSize', 14); grid on;
+set(gca, 'FontSize', 14);
+
+% 3. J_b_struct vs J_b_dec (новые данные)
+subplot(4,1,3); hold on;
+for bi = 1:numB
+    plot(1:nTest, J_b_struct_new(:, bi), [markers_struct{bi} '-'], 'Color', 'k', 'LineWidth', 1.5, ...
+        'MarkerFaceColor', 'k', 'DisplayName', sprintf('J_{struct}^{ч%d}', blackIdx(bi)));
+    plot(1:nTest, J_b_dec_new(:, bi), [markers_dec{bi} '--'], 'Color', 'k', 'LineWidth', 1.5, ...
+        'DisplayName', sprintf('J_{dec}^{ч%d}', blackIdx(bi)));
+end
+hold off; xlabel('Сэмпл', 'FontSize', 14); ylabel('J_b', 'FontSize', 14);
+title('Декомпозиция J_b (новые данные)', 'FontSize', 14);
+legend('Location','best', 'FontSize', 14); grid on;
+set(gca, 'FontSize', 14);
+
+% 4. Относительная погрешность (новые данные)
+subplot(4,1,4); hold on;
+for bi = 1:numB
+    relErrVec = abs(J_b_struct_new(:, bi) - J_b_dec_new(:, bi)) ./ (abs(J_b_struct_new(:, bi)) + 1e-15);
+    semilogy(1:nTest, relErrVec, [markers_struct{bi} '-'], 'Color', 'k', 'LineWidth', 1.5, ...
+        'MarkerFaceColor', 'k', 'DisplayName', sprintf('Чёрн%d', blackIdx(bi)));
+end
+hold off; xlabel('Сэмпл', 'FontSize', 14); ylabel('Отн. погрешность', 'FontSize', 14);
+title('Погрешность (новые данные)', 'FontSize', 14);
+legend('Location','best', 'FontSize', 14); grid on;
+set(gca, 'FontSize', 14);
+
+sgtitle('Верификация теоремы о декомпозиции', 'FontSize', 14);
+
+fprintf('========== ГРАФИКИ ПОСТРОЕНЫ ==========\n');
+fprintf('1-2: Декомпозиция и погрешность на тестовых данных\n');
+fprintf('3-4: Декомпозиция и погрешность на новых данных\n');
+fprintf('5:   Распределение J_w (тестовые данные)\n\n');
