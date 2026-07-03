@@ -1082,7 +1082,7 @@ classdef Trainer < handle
                     betaUpdates = lr * (obj.mBt{i} * mCorrFactor) ./ sqrtVBt;
 
                     for j = 1:numel(edges)
-                        edges(j).Alfa = edges(j).Alfa + alfaUpdates(j);
+                        edges(j).Alfa = max(obj.TrainingOptions.AlphaMin, edges(j).Alfa + alfaUpdates(j));
                         edges(j).Beta = edges(j).Beta + betaUpdates(j);
                     end
                 end
@@ -1211,67 +1211,114 @@ classdef Trainer < handle
                 if ~isempty(testedRemove),   testedRemove   = testedRemove(randperm(size(testedRemove,1)), :); end
             end
 
-            % 3. Случайная очередь: непроверенные ×2 (приоритет), проверенные ×1
-            mutationPool = {};
-            if canAdd
-                for k = 1:size(untestedAdd, 1)
-                    mutationPool{end+1} = struct('type', 'add', 'src', untestedAdd(k,1), 'dst', untestedAdd(k,2), 'prio', 1);
-                end
-                for k = 1:size(testedAdd, 1)
-                    mutationPool{end+1} = struct('type', 'add', 'src', testedAdd(k,1), 'dst', testedAdd(k,2), 'prio', 0);
-                end
-            end
-            if canRemove
-                for k = 1:size(untestedRemove, 1)
-                    mutationPool{end+1} = struct('type', 'remove', 'src', untestedRemove(k,1), 'dst', untestedRemove(k,2), 'prio', 1);
-                end
-                for k = 1:size(testedRemove, 1)
-                    mutationPool{end+1} = struct('type', 'remove', 'src', testedRemove(k,1), 'dst', testedRemove(k,2), 'prio', 0);
-                end
-            end
+            % 3. Двухфазная очередь: фаза 1 — связи с белыми вершинами, фаза 2 — чёрные между собой
+            whiteIndices = obj.graph.GetWhiteNodesIndices();
 
-            % Взвешенная случайная выборка без повторений: непроверенные ×2
-            if ~isempty(mutationPool)
-                % Дублируем приоритетные → выбор без повторений, но с перевесом
-                weightedPool = {};
-                for k = 1:numel(mutationPool)
-                    weightedPool{end+1} = mutationPool{k};
-                    if mutationPool{k}.prio, weightedPool{end+1} = mutationPool{k}; end
+            % Вспомогательная функция: построение очереди из классифицированных рёбер
+            function q = buildQueue(ua, ta, ur, tr)
+                pool = {};
+                for e = 1:size(ua, 1)
+                    pool{end+1} = struct('type', 'add', 'src', ua(e,1), 'dst', ua(e,2), 'prio', 1);
                 end
-                maxCandidates = min(opts.StructuralSearchCandidates, numel(mutationPool));
-                n = min(maxCandidates, numel(weightedPool));
-                idx = randperm(numel(weightedPool), n);
-                % Убираем дубликаты (могли выбрать две копии одного кандидата)
+                for e = 1:size(ta, 1)
+                    pool{end+1} = struct('type', 'add', 'src', ta(e,1), 'dst', ta(e,2), 'prio', 0);
+                end
+                for e = 1:size(ur, 1)
+                    pool{end+1} = struct('type', 'remove', 'src', ur(e,1), 'dst', ur(e,2), 'prio', 1);
+                end
+                for e = 1:size(tr, 1)
+                    pool{end+1} = struct('type', 'remove', 'src', tr(e,1), 'dst', tr(e,2), 'prio', 0);
+                end
+                if isempty(pool), q = {}; return; end
+
+                weighted = {};
+                for e = 1:numel(pool)
+                    weighted{end+1} = pool{e};
+                    if pool{e}.prio, weighted{end+1} = pool{e}; end
+                end
+                maxCand = min(opts.StructuralSearchCandidates, numel(pool));
+                n = min(maxCand, numel(weighted));
+                idx = randperm(numel(weighted), n);
                 seen = containers.Map('KeyType', 'char', 'ValueType', 'logical');
-                mutationQueue = {};
-                for k = 1:n
-                    m = weightedPool{idx(k)};
+                q = {};
+                for e = 1:n
+                    m = weighted{idx(e)};
                     key = sprintf('%s:%d->%d', m.type, m.src, m.dst);
                     if ~isKey(seen, key)
                         seen(key) = true;
-                        mutationQueue{end+1} = m;
+                        q{end+1} = m;
+                    end
+                end
+            end
+
+            % Разделение add-кандидатов на белые и чёрные
+            if canAdd
+                wUntAdd = []; bUntAdd = []; wTstAdd = []; bTstAdd = [];
+                for k = 1:size(untestedAdd, 1)
+                    if ismember(untestedAdd(k,1), whiteIndices) || ismember(untestedAdd(k,2), whiteIndices)
+                        wUntAdd(end+1, :) = untestedAdd(k, :);
+                    else
+                        bUntAdd(end+1, :) = untestedAdd(k, :);
+                    end
+                end
+                for k = 1:size(testedAdd, 1)
+                    if ismember(testedAdd(k,1), whiteIndices) || ismember(testedAdd(k,2), whiteIndices)
+                        wTstAdd(end+1, :) = testedAdd(k, :);
+                    else
+                        bTstAdd(end+1, :) = testedAdd(k, :);
                     end
                 end
             else
-                mutationQueue = {};
+                wUntAdd = []; bUntAdd = []; wTstAdd = []; bTstAdd = [];
             end
 
-            if isempty(mutationQueue)
+            % Разделение remove-кандидатов на белые и чёрные
+            if canRemove
+                wUntRem = []; bUntRem = []; wTstRem = []; bTstRem = [];
+                for k = 1:size(untestedRemove, 1)
+                    if ismember(untestedRemove(k,1), whiteIndices) || ismember(untestedRemove(k,2), whiteIndices)
+                        wUntRem(end+1, :) = untestedRemove(k, :);
+                    else
+                        bUntRem(end+1, :) = untestedRemove(k, :);
+                    end
+                end
+                for k = 1:size(testedRemove, 1)
+                    if ismember(testedRemove(k,1), whiteIndices) || ismember(testedRemove(k,2), whiteIndices)
+                        wTstRem(end+1, :) = testedRemove(k, :);
+                    else
+                        bTstRem(end+1, :) = testedRemove(k, :);
+                    end
+                end
+            else
+                wUntRem = []; bUntRem = []; wTstRem = []; bTstRem = [];
+            end
+
+            whiteQueue = buildQueue(wUntAdd, wTstAdd, wUntRem, wTstRem);
+            blackQueue = buildQueue(bUntAdd, bTstAdd, bUntRem, bTstRem);
+
+            if isempty(whiteQueue) && isempty(blackQueue)
                 fprintf('[Структурная оптимизация] Все кандидаты проверены — оптимальная структура найдена.\n');
                 obj.structuralSearchConverged = true;
                 return;
             end
 
-            fprintf('[Структурная оптимизация] Проверка %d кандидатов (add=%d, remove=%d, reconnect=%d)...\n', ...
-                numel(mutationQueue), ...
-                sum(cellfun(@(m) strcmp(m.type,'add'), mutationQueue)), ...
-                sum(cellfun(@(m) strcmp(m.type,'remove'), mutationQueue)), ...
-                sum(cellfun(@(m) strcmp(m.type,'reconnect'), mutationQueue)));
-
-            % Кеш проверенных рёбер в рамках одного шага поиска
+            % Кеш проверенных рёбер в рамках одного шага поиска (общий для обеих фаз)
             checkedEdges = containers.Map('KeyType', 'char', 'ValueType', 'double');
             obj.rejectedEdges = zeros(0, 2);
             skippedCount = 0;
+
+            % Двухфазная проверка: сначала белые, потом чёрные
+            phaseNames = {'белые', 'чёрные'};
+            phaseQueues = {whiteQueue, blackQueue};
+            for phase = 1:2
+                if ~isempty(bestMutation), break; end
+                mutationQueue = phaseQueues{phase};
+                if isempty(mutationQueue), continue; end
+
+                fprintf('[Структурная оптимизация] Фаза %d (%s): проверка %d кандидатов (add=%d, remove=%d)...\n', ...
+                    phase, phaseNames{phase}, numel(mutationQueue), ...
+                    sum(cellfun(@(m) strcmp(m.type,'add'), mutationQueue)), ...
+                    sum(cellfun(@(m) strcmp(m.type,'remove'), mutationQueue)));
 
             for c = 1:numel(mutationQueue)
                 mutation = mutationQueue{c};
@@ -1365,11 +1412,12 @@ classdef Trainer < handle
                     % Отклонённое ребро — сохраняем для визуализации
                     obj.rejectedEdges(end+1, :) = [mutation.src, mutation.dst];
                 end
-            end
+            end  % for c (mutationQueue)
 
             if skippedCount > 0
-                fprintf('[Структурная оптимизация] Пропущено дубликатов: %d\n', skippedCount);
+                fprintf('[Структурная оптимизация] Пропущено дубликатов в фазе %d (%s): %d\n', phase, phaseNames{phase}, skippedCount);
             end
+            end  % for phase
 
             % Если улучшений нет и все рёбра проверены — структура оптимальна
             if isempty(bestMutation) && canAdd
@@ -1562,49 +1610,94 @@ classdef Trainer < handle
         end
 
         function UpdateStructuralPlot(obj, ax)
-            % Отображает матрицу смежности: зелёный — рёбра,
-            % красный — отклонённые кандидаты, серый — непроверенные
+            % Отображает матрицу смежности с историей ВСЕХ проверок для текущей топологии
+            % Зелёный — существующее ребро, синий — проверенный add, оранжевый — проверенный remove
 
             n = numel(obj.graph.ListOfNodes);
             ids = arrayfun(@(nd) nd.ID, obj.graph.ListOfNodes);
 
+            % Хеш текущей топологии (как в StructuralSearchStep)
+            existingEdges = obj.graph.getExistingEdges();
+            if isempty(existingEdges)
+                graphHash = 'no_edges';
+            else
+                parts = cell(1, size(existingEdges, 1));
+                sorted = sortrows(existingEdges, [1 2]);
+                for r = 1:size(sorted, 1)
+                    parts{r} = sprintf('%d->%d', sorted(r,1), sorted(r,2));
+                end
+                graphHash = strjoin(parts, '|');
+            end
+
+            % M: 0=untested, 1=existing, 2=tested_add, 3=tested_remove, NaN=diag
             M = zeros(n, n);
+            hasCache = ~isempty(obj.globalEdgeCache);
+
             for i = 1:n
                 for j = 1:n
                     if i == j
                         M(i,j) = NaN;
-                    elseif obj.graph.hasEdge(ids(i), ids(j))
-                        M(i,j) = 1;
-                    elseif ~isempty(obj.rejectedEdges)
-                        idx = find(obj.rejectedEdges(:,1) == ids(i) & obj.rejectedEdges(:,2) == ids(j), 1);
-                        if ~isempty(idx), M(i,j) = -1; end
+                        continue;
+                    end
+
+                    edgeKey = sprintf('%d->%d', ids(i), ids(j));
+                    edgeExists = obj.graph.hasEdge(ids(i), ids(j));
+
+                    if edgeExists
+                        M(i,j) = 1;  % existing edge (default)
+                        if hasCache && isKey(obj.globalEdgeCache, edgeKey)
+                            cached = obj.globalEdgeCache(edgeKey);
+                            if strcmp(cached.graphHash, graphHash)
+                                M(i,j) = 3;  % tested as remove (rejected)
+                            end
+                        end
+                    else
+                        if hasCache && isKey(obj.globalEdgeCache, edgeKey)
+                            cached = obj.globalEdgeCache(edgeKey);
+                            if strcmp(cached.graphHash, graphHash)
+                                M(i,j) = 2;  % tested as add (rejected)
+                            end
+                        end
+                        % else stays 0 (untested)
                     end
                 end
             end
 
             cla(ax);
-            imagesc(ax, M, [-1, 1]);
-            colormap(ax, [1 0.7 0.7; 0.85 0.85 0.85; 0.4 0.8 0.4]);
+            imagesc(ax, M, [0, 3]);
+            colormap(ax, [0.85 0.85 0.85; 0.4 0.8 0.4; 0.3 0.6 1.0; 1.0 0.6 0.2]);
 
             ax.XTick = 1:n; ax.YTick = 1:n;
             ax.XAxisLocation = 'top';
             ax.XTickLabel = arrayfun(@(id) sprintf('%d', id), ids, 'UniformOutput', false);
             ax.YTickLabel = arrayfun(@(id) sprintf('%d', id), ids, 'UniformOutput', false);
-            title(ax, 'Структура графа');
+            title(ax, 'Структура модели');
             xlabel(ax, '\rightarrow to');
             ylabel(ax, 'from \rightarrow');
 
+            symbols = {'', '\surd', '+', '-'};
             for i = 1:n
                 for j = 1:n
-                    if isnan(M(i,j)), continue; end
-                    if M(i,j) == 1, lbl = '\surd'; c = 'k';
-                    elseif M(i,j) == -1, lbl = '\times'; c = 'k';
-                    else, lbl = ''; c = 'k';
-                    end
-                    text(ax, j, i, lbl, 'HorizontalAlignment', 'center', ...
-                        'Color', c, 'FontSize', 14, 'FontWeight', 'bold');
+                    if isnan(M(i,j)) || M(i,j) == 0, continue; end
+                    text(ax, j, i, symbols{M(i,j) + 1}, 'HorizontalAlignment', 'center', ...
+                        'Color', 'k', 'FontSize', 14, 'FontWeight', 'bold');
                 end
             end
+
+            % Легенда по цветам
+            hold(ax, 'on');
+            colors = [0.85 0.85 0.85; 0.4 0.8 0.4; 0.3 0.6 1.0; 1.0 0.6 0.2];
+            labels = {'Не проверено', 'Ребро есть', 'Add (отклонён)', 'Remove (отклонён)'};
+            hDummy = zeros(1, 4);
+            for c = 1:4
+                hDummy(c) = patch(ax, NaN, NaN, colors(c,:), 'EdgeColor', 'none');
+            end
+            legend(ax, hDummy, labels, ...
+                'Location', 'southoutside', ...
+                'NumColumns', 2, ...
+                'FontSize', 8, ...
+                'Box', 'off');
+            hold(ax, 'off');
         end
     end
 end
