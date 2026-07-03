@@ -1,6 +1,6 @@
 %% Очистить все
 clear; clc;
-rng(42);
+rng(22);
 
 import BWGraph.*;
 import BWGraph.CustomMatrix.*;
@@ -8,11 +8,12 @@ import BWGraph.RandomGenerator.*;
 import BWGraph.Trainer.*;
 
 HeatBC = coreFunctions.Heating2DModel(30, 20, 20, 70, 1.5e-5, 0.3, 0.360, 30, 10);
-betaGen = FullRandomBetaGen(1,1e2); % Гиперпараметр
+betaGen = FullRandomBetaGen(0,1); % Гиперпараметр
 
 nodeA = Node(1, 1,'White',HeatBC,'linear');
 nodeB = Node(2, 1,'Black',HeatBC,'linear');
 nodeC = Node(3, 1,'Black',HeatBC,'linear');
+% nodeD = Node(4, 1,'Black',HeatBC,'linear');
 
 % Индивидуальные параметры для вершин (общие для всех экспериментов)
 NodeWeight = [1 0.5 0.5]; % Весовые коэффициенты вершин
@@ -35,7 +36,10 @@ timeRange_for_v2 = [1000, 15000];
 TinfRange_for_v2 = [800, 1150];  
 
 timeRange_for_v3 = [1000, 9000];
-TinfRange_for_v3 = [900, 1100];  
+TinfRange_for_v3 = [900, 1100]; 
+
+% timeRange_for_v4 = [1000, 12000];
+% TinfRange_for_v4 = [1100, 1250];  
 
 % Случайные значения времени и температуры окружающей среды (значения X)
 timeValues_for_v1 = rand(numSamples, 1) * (timeRange_for_v1(2) - timeRange_for_v1(1)) + timeRange_for_v1(1);
@@ -47,6 +51,9 @@ TinfValues_for_v2 = rand(numSamples, 1) * (TinfRange_for_v2(2) - TinfRange_for_v
 timeValues_for_v3 = rand(numSamples, 1) * (timeRange_for_v3(2) - timeRange_for_v3(1)) + timeRange_for_v3(1);
 TinfValues_for_v3 = rand(numSamples, 1) * (TinfRange_for_v3(2) - TinfRange_for_v3(1)) + TinfRange_for_v3(1);
 
+% timeValues_for_v4 = rand(numSamples, 1) * (timeRange_for_v4(2) - timeRange_for_v4(1)) + timeRange_for_v4(1);
+% TinfValues_for_v4 = rand(numSamples, 1) * (TinfRange_for_v4(2) - TinfRange_for_v4(1)) + TinfRange_for_v4(1);
+
 
 % Зададим синтетические значения средней температуры, смещенной
 % относительно нагрева соседних вершин
@@ -55,6 +62,7 @@ for i = 1:numSamples
     inputParams_for_v1 = [timeValues_for_v1(i); TinfValues_for_v1(i)];
     inputParams_for_v2 = [timeValues_for_v2(i); TinfValues_for_v2(i)];
     inputParams_for_v3 = [timeValues_for_v3(i); TinfValues_for_v3(i)];
+    % inputParams_for_v4 = [timeValues_for_v4(i); TinfValues_for_v4(i)];
 
     TavgValues(i) = HeatBC.CalcCoreFunction(inputParams_for_v1) + ...
         0.1 * HeatBC.CalcCoreFunction(inputParams_for_v2) + ...
@@ -74,9 +82,11 @@ for i = 1:numSamples
     inputParams_for_v1 = [timeValues_for_v1(i); TinfValues_for_v1(i)];
     inputParams_for_v2 = [timeValues_for_v2(i); TinfValues_for_v2(i)];
     inputParams_for_v3 = [timeValues_for_v3(i); TinfValues_for_v3(i)];
+    % inputParams_for_v4 = [timeValues_for_v4(i); TinfValues_for_v4(i)];
     XData(i) = XData(i).addRow(inputParams_for_v1);
     XData(i) = XData(i).addRow(inputParams_for_v2);
     XData(i) = XData(i).addRow(inputParams_for_v3);
+    % XData(i) = XData(i).addRow(inputParams_for_v4);
 end
 
 for i = 1:numSamples
@@ -103,7 +113,7 @@ yTest = YData_for_bagging(test(cv));
 trainerOptions = TrainingOptions( ...
     "LearningRate", 0.01, ...
     "NodeSize", [1, 1, 1], ...
-    "LRDecayInterval", 5, ...
+    "LRDecayInterval", 50, ...
     "Epoches", 500, ...
     "ClipUp", 1e7, ...
     "ClipDown", -1e7, ...
@@ -115,11 +125,11 @@ trainerOptions = TrainingOptions( ...
     "LossFunction",'mse', ...
     "TargetNodeIndices",[], ...
     "BatchSize", 1, ...
-    "TargetError", 1e-6, ...
+    "TargetError", 0.5, ...
     'EnableStructuralSearch', true, ...
-    'StructuralSearchInterval', 6, ...
-    'StructuralSearchCandidates', 3, ...
-    'StructuralSearchEpochs', 10, ...
+    'StructuralSearchInterval', 10, ...
+    'StructuralSearchCandidates', 5, ...
+    'StructuralSearchEpochs', 5, ...
     'StructuralSearchMinEdges', 0);
 
 % Инициализация учителя

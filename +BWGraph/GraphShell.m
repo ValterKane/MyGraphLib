@@ -6,8 +6,6 @@ classdef GraphShell < handle
 
     properties
         ListOfNodes BWGraph.Node  % Вектор всех Node
-        MinAlpha     (1,1) double = 0.01   % Мин. α при топологической инициализации
-        SafetyFactor (1,1) double = 0.8    % Доля бюджета D(v) для Σα_in
     end
 
     properties (Access = private)
@@ -101,8 +99,11 @@ classdef GraphShell < handle
             % Преобразуем массив узлов в cell-массив для varargin
             nodeCellArray = num2cell(nodes);
 
+            % Собираем NodeWeight из загруженных Gamma
+            loadedGammas = arrayfun(@(n) n.Gamma, nodes);
+
             % Создаем объект GraphShell
-            loadedGraph = BWGraph.GraphShell(betaGen, nodeCellArray{:});
+            loadedGraph = BWGraph.GraphShell(betaGen, loadedGammas, nodeCellArray{:});
 
             % 5. Восстановление NodeFunction для всех узлов
             for i = 1:numel(loadedGraph.ListOfNodes)
@@ -164,9 +165,9 @@ classdef GraphShell < handle
             % Добавляем узлы
             obj.ListOfNodes = [obj.ListOfNodes; varargin{:}];
 
-            % Генерируем α с учётом топологии (условие 3.3), β — случайно
-            obj.GenerateTopologyAwareAlpha();
+            % Генерируем beta, alpha — через GenerateTopologyAwareAlpha (вызывается извне)
             BetaGenerator.Generate(obj);
+            % α инициализируются нулём — пользователь или Trainer должны вызвать GenerateTopologyAwareAlpha
 
             % Обновляем счётчики узлов
             obj.numOfBlackNodes = numel(obj.GetBlackNodesIndices);
@@ -177,6 +178,52 @@ classdef GraphShell < handle
             [obj.ListOfNodes.Gamma] = gammas{:};
         end
 
+        function GenerateTopologyAwareAlpha(obj, SafetyFactor)
+            % Публичная генерация α с учётом топологии.
+            % Гарантирует Σα_in(v) ≤ SafetyFactor·(1+Σα_out(v)).
+            % Вызывается из Trainer или вручную при использовании GraphShell без обучения.
+            arguments
+                obj          BWGraph.GraphShell
+                SafetyFactor (1,1) double = 0.8
+            end
+
+            n = numel(obj.ListOfNodes);
+            if n == 0, return; end
+
+            incomingEdges = cell(n, 1);
+            for i = 1:n
+                incomingEdges{i} = obj.getIncomingEdges(obj.ListOfNodes(i));
+            end
+
+            for i = 1:n
+                edges = obj.ListOfNodes(i).getOutEdges();
+                for j = 1:numel(edges)
+                    edges(j).Alfa = 0;
+                end
+            end
+
+            for iter = 1:10
+                changed = false;
+                for v = 1:n
+                    inEdges = incomingEdges{v};
+                    nIn = numel(inEdges);
+                    if nIn == 0, continue; end
+
+                    outEdges = obj.ListOfNodes(v).getOutEdges();
+                    D_v = 1 + sum([outEdges.Alfa]);
+                    budget = SafetyFactor * D_v;
+
+                    for j = 1:nIn
+                        newAlpha = budget / nIn;
+                        if abs(inEdges(j).Alfa - newAlpha) > 1e-8
+                            inEdges(j).Alfa = newAlpha;
+                            changed = true;
+                        end
+                    end
+                end
+                if ~changed, break; end
+            end
+        end
 
         % Прямой матричный подход
         function Forward(obj, Data)
@@ -221,52 +268,6 @@ classdef GraphShell < handle
                 obj.ListOfNodes(i).setFResult(F_vector(i));
             end
             obj.fi_result = F_vector;
-        end
-
-        function GenerateTopologyAwareAlpha(obj)
-            % Генерация α с учётом топологии. Гарантирует Σα_in(v) < 1+Σα_out(v) ∀v (3.3).
-            % Бюджет D(v) распределяется равномерно между входящими рёбрами.
-            n = numel(obj.ListOfNodes);
-            if n == 0, return; end
-
-            % Собираем входящие рёбра для каждой вершины
-            incomingEdges = cell(n, 1);
-            for i = 1:n
-                incomingEdges{i} = obj.getIncomingEdges(obj.ListOfNodes(i));
-            end
-
-            % Инициализируем все α нулём
-            for i = 1:n
-                edges = obj.ListOfNodes(i).getOutEdges();
-                for j = 1:numel(edges)
-                    edges(j).Alfa = 0;
-                end
-            end
-
-            % Итеративное распределение до стабилизации
-            for iter = 1:10
-                changed = false;
-                for v = 1:n
-                    inEdges = incomingEdges{v};
-                    nIn = numel(inEdges);
-                    if nIn == 0, continue; end
-
-                    outEdges = obj.ListOfNodes(v).getOutEdges();
-                    D_v = 1 + sum([outEdges.Alfa]);
-                    budget = obj.SafetyFactor * D_v;
-
-                    weights = ones(1, nIn) / nIn;  % равномерное распределение
-
-                    for j = 1:nIn
-                        newAlpha = max(obj.MinAlpha, budget * weights(j));
-                        if abs(inEdges(j).Alfa - newAlpha) > 1e-8
-                            inEdges(j).Alfa = newAlpha;
-                            changed = true;
-                        end
-                    end
-                end
-                if ~changed, break; end
-            end
         end
 
         function invalidateForwardCache(obj)
@@ -808,20 +809,18 @@ classdef GraphShell < handle
 
                 if nBlack > 0
                     legendHandles = [legendHandles, hBlack];
-                    legendLabels = [legendLabels, 'Черные вершины (без данных)'];
+                    legendLabels = [legendLabels, 'Чёрные'];
                 end
                 if nWhite > 0
                     legendHandles = [legendHandles, hWhite];
-                    legendLabels = [legendLabels, 'Белые вершины (с данными)'];
+                    legendLabels = [legendLabels, 'Белые'];
                 end
 
-                % Создаем легенду
+                % Компактная легенда в правом нижнем углу
                 lg = legend(legendHandles, legendLabels, ...
-                    'Location', 'northeast', ...
-                    'FontSize', 12);
-
-                % Устанавливаем фон легенды
-                set(lg, 'Color', [0.95, 0.95, 0.95]);
+                    'Location', 'southeast', ...
+                    'FontSize', 8, ...
+                    'Box', 'off');
 
                 hold off;
             end
@@ -1110,8 +1109,6 @@ classdef GraphShell < handle
             gammas = [newNodes.Gamma];
             nodeCellArray = num2cell(newNodes);
             cloned = BWGraph.GraphShell(obj.BetaGenerator, gammas, nodeCellArray{:});
-            cloned.MinAlpha = obj.MinAlpha;
-            cloned.SafetyFactor = obj.SafetyFactor;
 
             % 3b. Восстанавливаем ПРАВИЛЬНЫЕ параметры рёбер (конструктор перегенерировал их)
             for i = 1:n

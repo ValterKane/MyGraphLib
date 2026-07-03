@@ -1,6 +1,6 @@
 %% Очистить все
 clear; clc;
-rng(42);
+rng(22);
 
 import BWGraph.*;
 import BWGraph.CustomMatrix.*;
@@ -8,23 +8,24 @@ import BWGraph.RandomGenerator.*;
 import BWGraph.Trainer.*;
 
 HeatBC = coreFunctions.Heating2DModel(30, 20, 20, 70, 1.5e-5, 0.3, 0.360, 30, 10);
+
 betaGen = FullRandomBetaGen(0,1); % Гиперпараметр
 
 nodeA = Node(1, 1,'White',HeatBC,'linear');
 nodeB = Node(2, 1,'Black',HeatBC,'linear');
 nodeC = Node(3, 1,'Black',HeatBC,'linear');
 
-% nodeB.addEdge(nodeA);
-% nodeC.addEdge(nodeA);
-
-nodeA.addEdge(nodeB);
 nodeB.addEdge(nodeA);
-
-nodeA.addEdge(nodeC);
 nodeC.addEdge(nodeA);
 
-nodeB.addEdge(nodeC);
-% nodeC.addEdge(nodeB);
+% nodeA.addEdge(nodeB);
+% nodeB.addEdge(nodeA);
+% 
+% nodeA.addEdge(nodeC);
+% nodeC.addEdge(nodeA);
+% 
+% nodeB.addEdge(nodeC);
+% % nodeC.addEdge(nodeB);
 
 
 % Индивидуальные параметры для вершин (общие для всех экспериментов)
@@ -116,13 +117,13 @@ yTest = YData_for_bagging(test(cv));
 trainerOptions = TrainingOptions( ...
     "LearningRate", 0.01, ...
     "NodeSize", [1, 1, 1], ...
-    "LRDecayInterval", 5, ...
+    "LRDecayInterval", 50, ...
+    "TargetError", 0.5, ...
     "Epoches", 500, ...
     "ClipUp", 1e7, ...
     "ClipDown", -1e7, ...
-    "AlphaSafetyFactor", 0.5, ...
-    "StructInitAlpha", 0, ...
-    "StructInitBeta", 0, ...
+    "Lambda_Self", 0, ...
+    "Lambda_Struct", 1, ...
     "EnablePlateauEscape", false, ...
     "ErrorMetric",'mae', ...
     "LossFunction",'mse', ...

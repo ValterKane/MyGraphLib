@@ -82,10 +82,8 @@ classdef Trainer < handle
             obj.nodes = Graph.ListOfNodes;
             obj.TrainingOptions = TrainingOptions;
 
-            % Применяем гиперпараметры α-генерации и перегенерируем α под топологию
-            obj.graph.MinAlpha = TrainingOptions.AlphaMin;
-            obj.graph.SafetyFactor = TrainingOptions.AlphaSafetyFactor;
-            obj.graph.GenerateTopologyAwareAlpha();
+            % Генерация α с учётом топологии через публичный метод GraphShell
+            obj.graph.GenerateTopologyAwareAlpha(TrainingOptions.AlphaSafetyFactor);
 
             % Инициализация структур для хранения лучших параметров
             nodes = obj.graph.ListOfNodes;
@@ -193,12 +191,12 @@ classdef Trainer < handle
                 fprintf('\nНастройка на эпохе No%d завершена!\n',epoch)
                 trainEerror = obj.trainErrors(end);
 
-                % Расчет ошибки на тестовой выборке
+                % Расчет ошибки на тестовой выборке ПОСЛЕ обучения
                 fprintf('\nВыполняю расчет метрики на тестовой выборке...\n')
                 testError = obj.CalculateError(XDataTest, YDataTest, obj.TrainingOptions.TargetNodeIndices, obj.TrainingOptions.ErrorMetric);
                 obj.testErrors(end+1) = testError;
 
-                % Вычисление разницы между ошибками
+                % Вычисление разницы между ошибками (на параметрах ПОСЛЕ обучения)
                 errorDiffs(epoch) = testError - trainEerror;
 
                 % Проверка критериев остановки
@@ -317,9 +315,9 @@ classdef Trainer < handle
 
                 drawnow; % Обновляем графики
 
-                % Продолжаем обучение из текущей точки (без отката к лучшим параметрам).
-                % Лучшие параметры сохраняются через SaveBestParameters при улучшении,
-                % восстанавливаются только в конце обучения.
+                % RestoreBestParameters отключён в цикле — даём модели шанс
+                % пройти через «плохие» состояния к потенциально лучшим.
+                % Восстановление происходит только в конце обучения (строка 350).
 
                 % --- Структурный поиск (если включен и не сошёлся) ---
                 if obj.TrainingOptions.EnableStructuralSearch && ...
@@ -795,13 +793,16 @@ classdef Trainer < handle
                         end
                     end
 
-                    % J_self для черных вершин
+                    % J_self для черных вершин (раздел 4.2, формула 4.10)
                     J_self = zeros(1, numNodes);
                     for b = obj.blackNodeIndices
                         outgoingEdges = obj.outgoingEdgesCache{b};
+                        sum_alpha_out = sum([outgoingEdges.Alfa]);
 
-                        % Знаменатель из (2.6): 1 + Σα_out
-                        denominator = 1 + sum([outgoingEdges.Alfa]);
+                        % Без исходящих рёбер J_self не определён (замечание 4.3)
+                        if sum_alpha_out == 0
+                            continue;
+                        end
 
                         % G_In — вклад входящих соседей (формула 2.3)
                         G_in = 0;
@@ -816,12 +817,13 @@ classdef Trainer < handle
                         % Σβ_out
                         sum_beta_out = sum([outgoingEdges.Beta]);
 
-                        % F_shadow = та же формула (2.6), но без L_b — вклад только от соседей
-                        F_shadow = (G_in - sum_beta_out) / denominator;
+                        % F̃_b = (G_in − Σβ_out) / Σα_out — формула (4.10)
+                        % Только Σα_out, без +1 (замечание 4.3: исключаем долю собственного аппроксиматора)
+                        F_shadow = (G_in - sum_beta_out) / sum_alpha_out;
 
                         F_b = modelValues(b);
 
-                        % Собственная невязка: J_self = L_b / denominator
+                        % Собственная структурная невязка: J_b^{self} = ℓ(F_b, F̃_b)
                         J_self(b) = (F_b - F_shadow);
                     end
 
@@ -924,7 +926,7 @@ classdef Trainer < handle
                         key_gamma = sprintf('node%d_gamma', i);
                         dF_dgamma = gamma_derivatives(key_gamma);
                         h_i = obj.TrainingOptions.getNodeMultiplier(i);
-                        batchGmGrad{i} = batchGmGrad{i} - h_i * dF_dgamma * J_total(i);
+                        batchGmGrad{i,batchIdx} = batchGmGrad{i,batchIdx} - h_i * dF_dgamma * J_total(i);
                         
                         % Градиенты для исходящих рёбер (alpha и beta)
                         for j = 1:numel(edges)
@@ -985,55 +987,12 @@ classdef Trainer < handle
                     % Добавляем L2 регуляризацию (λ1 в формуле 3.7)
                     for i = 1:numNodes
                         % Регуляризация по gamma
-                        batchGmGrad{i} = batchGmGrad{i} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).Gamma;
+                        batchGmGrad{i,batchIdx} = batchGmGrad{i,batchIdx} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).Gamma;
                         edges = obj.outgoingEdgesCache{i};
                         for j = 1:numel(edges)
                             edge = edges(j);
                             batchAlGrad{i,batchIdx}(j) = batchAlGrad{i,batchIdx}(j) + obj.TrainingOptions.Lambda_Alph * edge.Alfa;
                             batchBtGrad{i,batchIdx}(j) = batchBtGrad{i,batchIdx}(j) + obj.TrainingOptions.Lambda_Beta * edge.Beta;
-                        end
-                    end
-                end
-
-                % --- Стабилизирующий регуляризатор Rs(α) — формулы (3.5), (3.9a)-(3.9c) ---
-                lambda_Rs = obj.TrainingOptions.Lambda_Stability;
-                if ~isempty(lambda_Rs) && lambda_Rs > 0
-                    for i = 1:numNodes
-                        edges_i = obj.outgoingEdgesCache{i};
-                        if isempty(edges_i) && isempty(obj.incomingEdgesCache{i})
-                            continue;
-                        end
-
-                        D_i = 1 + sum([edges_i.Alfa]);
-
-                        sum_alpha_in = 0;
-                        incomingEdges = obj.incomingEdgesCache{i};
-                        for e_idx = 1:numel(incomingEdges)
-                            sum_alpha_in = sum_alpha_in + incomingEdges(e_idx).Alfa;
-                        end
-
-                        r_v = max(0, sum_alpha_in / D_i - 1);  % формула (3.11)
-                        if r_v <= 0, continue; end
-
-                        coef = lambda_Rs * 2 * r_v;
-
-                        % Производная по входящим α: +2·r_v / D(v) — формула (3.9c)
-                        for e_idx = 1:numel(incomingEdges)
-                            e = incomingEdges(e_idx);
-                            sourceIdx = e.SourceNode.ID;
-                            if isempty(sourceIdx), continue; end
-                            sourceEdges = obj.outgoingEdgesCache{sourceIdx};
-                            edgePos = find(sourceEdges == e, 1);
-                            if ~isempty(edgePos)
-                                batchAlGrad{sourceIdx,batchIdx}(edgePos) = ...
-                                    batchAlGrad{sourceIdx,batchIdx}(edgePos) + coef / D_i;
-                            end
-                        end
-
-                        % Производная по исходящим α: -2·r_v · Σα_in / D(v)² — формула (3.9a)
-                        if ~isempty(edges_i)
-                            dRs_out = -coef * sum_alpha_in / (D_i^2);
-                            batchAlGrad{i,batchIdx} = batchAlGrad{i,batchIdx} + dRs_out;
                         end
                     end
                 end
@@ -1097,34 +1056,57 @@ classdef Trainer < handle
                 beta2_t = obj.TrainingOptions.Beta2^obj.t;
                 mCorrFactor = 1 / (1 - beta1_t);
                 vCorrFactor = 1 / (1 - beta2_t);
+                lr = obj.TrainingOptions.LearningRate;
 
                 for i = 1:numNodes
                     edges = obj.outgoingEdgesCache{i};
+
+                    % Гамма обновляется всегда (не зависит от рёбер)
+                    obj.mGm{i} = obj.TrainingOptions.Beta1 * obj.mGm{i} + (1-obj.TrainingOptions.Beta1) * batchGmGrad{i,batchIdx};
+                    obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i,batchIdx}.^2);
+                    sqrtVGm = sqrt(obj.vGm{i} * vCorrFactor) + epsilon;
+                    obj.nodes(i).Gamma = max(0, obj.nodes(i).Gamma + lr * (obj.mGm{i} * mCorrFactor) / sqrtVGm);
+
                     if isempty(edges), continue; end
 
-                    % Обновление моментов ADAM (формулы 3.14-3.15)
+                    % Обновление моментов ADAM для alpha/beta (формулы 3.14-3.15)
                     obj.mAl{i} = obj.TrainingOptions.Beta1 * obj.mAl{i} + (1-obj.TrainingOptions.Beta1) * batchAlGrad{i,batchIdx};
                     obj.vAl{i} = obj.TrainingOptions.Beta2 * obj.vAl{i} + (1-obj.TrainingOptions.Beta2) * (batchAlGrad{i,batchIdx}.^2);
                     obj.mBt{i} = obj.TrainingOptions.Beta1 * obj.mBt{i} + (1-obj.TrainingOptions.Beta1) * batchBtGrad{i,batchIdx};
                     obj.vBt{i} = obj.TrainingOptions.Beta2 * obj.vBt{i} + (1-obj.TrainingOptions.Beta2) * (batchBtGrad{i,batchIdx}.^2);
-                    obj.mGm{i} = obj.TrainingOptions.Beta1 * obj.mGm{i} + (1-obj.TrainingOptions.Beta1) * batchGmGrad{i,batchIdx};
-                    obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i,batchIdx}.^2);
 
-                    % Применение обновлений (формула 3.16)
-                    lr = obj.TrainingOptions.LearningRate;
+                    % Применение обновлений alpha/beta (формула 3.16)
                     sqrtVAl = sqrt(obj.vAl{i} * vCorrFactor) + epsilon;
                     sqrtVBt = sqrt(obj.vBt{i} * vCorrFactor) + epsilon;
-                    sqrtVGm = sqrt(obj.vGm{i} * vCorrFactor) + epsilon;
-
                     alfaUpdates = lr * (obj.mAl{i} * mCorrFactor) ./ sqrtVAl;
                     betaUpdates = lr * (obj.mBt{i} * mCorrFactor) ./ sqrtVBt;
-                    obj.nodes(i).Gamma = obj.nodes(i).Gamma + lr * (obj.mGm{i} * mCorrFactor) / sqrtVGm;
 
                     for j = 1:numel(edges)
                         edges(j).Alfa = edges(j).Alfa + alfaUpdates(j);
                         edges(j).Beta = edges(j).Beta + betaUpdates(j);
                     end
                 end
+
+                % --- Жёсткое ограничение устойчивости после ADAM: Σα_in(v) < 1+Σα_out(v) ---
+                sf = obj.TrainingOptions.StabilityClampFactor;
+                for iter = 1:10
+                    fixed = true;
+                    for v = 1:numNodes
+                        D_v = 1 + sum([obj.outgoingEdgesCache{v}.Alfa]);
+                        inEdges = obj.incomingEdgesCache{v};
+                        if isempty(inEdges), continue; end
+                        sumIn = sum([inEdges.Alfa]);
+                        if sumIn >= D_v
+                            scale = sf * D_v / sumIn;
+                            for e = inEdges
+                                e.Alfa = e.Alfa * scale;
+                            end
+                            fixed = false;
+                        end
+                    end
+                    if fixed, break; end
+                end
+
             end
             obj.trainErrors(end+1) = total_errors / total_points;
         end

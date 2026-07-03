@@ -36,8 +36,8 @@ classdef TrainingOptions < handle
         Lambda_Beta          (1,1) double {mustBeNonnegative}
         Lambda_Gamma         (1,1) double {mustBeNonnegative}
         Lambda_Agg           (1,1) double {mustBeNonnegative}
-        Lambda_Self          (1,1) double {mustBeNonnegative}
-        Lambda_Struct        (1,1) double {mustBeNonnegative}
+        Lambda_Self          (1,1) double {mustBeNonnegative} = 0
+        Lambda_Struct        (1,1) double {mustBeNonnegative} = 1
         Lambda_Stability (1,1) double {mustBeNonnegative} = 0
         RpShiftPercent   (1,1) double {mustBeNonnegative} = 20
         StructInitAlpha  (1,1) double {mustBeNonnegative} = 0.5
@@ -47,6 +47,7 @@ classdef TrainingOptions < handle
         StructuralComplexityPenalty (1,1) double {mustBeNonnegative} = 0
         AlphaMin          (1,1) double {mustBeNonnegative} = 0.01
         AlphaSafetyFactor (1,1) double {mustBePositive} = 0.8
+        StabilityClampFactor (1,1) double {mustBePositive} = 0.99
         StructuralCleanupThreshold (1,1) double {mustBeNonnegative} = 0.01
         LRDecayInterval  (1,1) double {mustBePositive, mustBeInteger} = 1
 
@@ -109,6 +110,7 @@ classdef TrainingOptions < handle
                 options.StructuralComplexityPenalty (1,1) double {mustBeNonnegative}
                 options.AlphaMin          (1,1) double {mustBeNonnegative}
                 options.AlphaSafetyFactor (1,1) double {mustBePositive}
+                options.StabilityClampFactor (1,1) double {mustBePositive}
                 options.StructuralCleanupThreshold (1,1) double {mustBeNonnegative}
                 options.LRDecayInterval (1,1) double {mustBePositive, mustBeInteger} = 1
                 options.Lambda_Self     (1,1) double {mustBeNonnegative}
