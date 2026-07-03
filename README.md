@@ -28,7 +28,7 @@ nodeW = Node(3, 30, 'White', Heat_w);
 node1.addEdge(node2);
 node2.addEdge(nodeW);
 
-% 4. Оболочка графа
+% 4. Оболочка графа (α = 0; генерируется в Trainer через GenerateTopologyAwareAlpha)
 model = GraphShell(betaGen, [1 0.5 0.5], node1, node2, nodeW);
 model.DrawGraph_New('Модель нагрева');
 
@@ -39,7 +39,7 @@ trainer = Trainer(model, opts);
 trainer.Train(X_train, Y_train, X_test, Y_test);
 ```
 
-> **Важно:** α-параметры теперь генерируются **автоматически внутри `GraphShell`** через `GenerateTopologyAwareAlpha()` — с гарантией выполнения условия устойчивости: **Σα_in(v) < 1 + Σα_out(v)** для каждой вершины v. Внешний `AlphaGenerator` больше не требуется.
+> **Важно:** α генерируется через публичный метод `GenerateTopologyAwareAlpha(SafetyFactor)`, вызываемый **из конструктора `Trainer`**. Это гарантирует условие устойчивости: **Σα_in(v) < 1 + Σα_out(v)** для каждой вершины v. При использовании `GraphShell` без `Trainer` метод нужно вызвать вручную. Параметр `SafetyFactor` (по умолчанию 0.8) управляется через `TrainingOptions.AlphaSafetyFactor`. Внешний `AlphaGenerator` больше не требуется.
 
 ---
 
@@ -133,7 +133,7 @@ $$F_v = \sigma\left(\gamma_v \cdot f_v(x_v) + \sum_{u \in \text{In}(v)} \bigl(\a
 | **α** (Alfa) | Линейный коэффициент передачи: вклад `F_u` в `F_v` умножается на α |
 | **β** (Beta) | Аддитивное смещение |
 
-Генерация α теперь **внутренняя**: метод `GenerateTopologyAwareAlpha()` распределяет α так, чтобы ∀v выполнялось **условие устойчивости**:
+Генерация α — публичный метод `GenerateTopologyAwareAlpha(SafetyFactor)`. Распределяет α так, чтобы ∀v выполнялось **условие устойчивости**:
 
 $$\sum_{e \in \text{In}(v)} \alpha_e \;<\; 1 + \sum_{e \in \text{Out}(v)} \alpha_e$$
 
@@ -153,6 +153,22 @@ $$F_v = \frac{L_v + G_{\text{in}}(v) - \sum_{e \in \text{Out}(v)} \beta_e}{1 + \
 
 **Кеширование:** M⁻¹ = (D − A_in)⁻¹ и const = B_in − B_out не зависят от входных данных x — вычисляются **один раз** при изменении параметров рёбер и переиспользуются между сэмплами. Ускорение ~10×.
 - **Кеширование `CalcCoreFunction`:** результат f_v(x_v) кешируется в `Node` между вызовами с одинаковыми входными данными.
+
+### Обратный проход: функция потерь чёрной вершины
+
+Для чёрной вершины полная невязка складывается из структурной и собственной составляющих:
+
+$$J_b = \lambda_{struct} \cdot J_b^{struct} + \lambda_{self} \cdot J_b^{self}$$
+
+**Собственная структурная невязка** измеряет рассогласование между фактическим состоянием вершины и «теневым» значением, построенным только по состояниям соседей (без собственного аппроксиматора):
+
+$$\tilde{F}_b = \frac{G_{in}(b) - \sum_{e \in Out(b)} \beta_e}{\sum_{e \in Out(b)} \alpha_e}, \qquad J_b^{self} = F_b - \tilde{F}_b$$
+
+При Σα_out = 0 теневое значение не определено — J_self = 0.
+
+### Устойчивость
+
+Жёсткое ограничение после каждого ADAM-шага: для каждой вершины v, если Σα_in(v) ≥ 1+Σα_out(v), все входящие α масштабируются с коэффициентом `StabilityClampFactor × (1+Σα_out) / Σα_in`. По умолчанию StabilityClampFactor = 0.99.
 
 ---
 
@@ -214,7 +230,6 @@ data = readtable("file.xlsx", VariableNamingRule="preserve");
 | `Lambda_Agg` | 0 | Штраф агрегации ошибок |
 | `Lambda_Self` | 0 | Собственная регуляризация |
 | `Lambda_Struct` | 0 | Структурная регуляризация |
-| `Lambda_Stability` | 0 | Штраф нарушения условия устойчивости |
 | **Метрики** |||
 | `ErrorMetric` | `"mae"` | `mae`, `mse`, `rmse`, `mape` |
 | `LossFunction` | `"mae"` | `mae`, `mse`, `huber`, `logcosh` |
@@ -237,6 +252,7 @@ data = readtable("file.xlsx", VariableNamingRule="preserve");
 | **Инициализация α** |||
 | `AlphaMin` | 0.01 | Минимальное значение α |
 | `AlphaSafetyFactor` | 0.8 | Доля бюджета D(v) для Σα_in |
+| `StabilityClampFactor` | 0.99 | Коэффициент жёсткого ограничения α после ADAM |
 | `StructInitAlpha` | 0.5 | Начальное α для новых рёбер |
 | `StructInitBeta` | 1 | Начальное β для новых рёбер |
 
@@ -308,7 +324,7 @@ model.invalidateForwardCache()                       % Сбросить кеш �
 | `computeOutgoingAlphaDerivativeForEdge(idx)` | ∂F/∂α исходящего ребра |
 | `computeOutgoingBetaDerivativeForEdge(idx)` | ∂F/∂β исходящего ребра |
 | `DrawGraph_New(titleStr, ax)` | Визуализация графа (опционально на заданных осях) |
-| `GenerateTopologyAwareAlpha()` | Генерация α с гарантией устойчивости |
+| `GenerateTopologyAwareAlpha(SafetyFactor)` | Генерация α с гарантией устойчивости (публичный) |
 | `invalidateForwardCache()` | Сброс кеша M⁻¹ |
 | `addEdgeBetween(src, dst, α, β)` | Добавить направленное ребро |
 | `removeEdgeBetween(src, dst)` | Удалить направленное ребро |
