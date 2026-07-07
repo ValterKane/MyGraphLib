@@ -1,6 +1,29 @@
 # MyGraphLib — MATLAB-библиотека для моделирования черно-белого графа (Black-White Graph)
 
-Библиотека реализует оболочку **Black-White Graph (BWG)** — графовую GLM-модель над произвольными ядровыми функциями-экспертами. Вершины графа делятся на *белые* (с эталонными данными) и *чёрные* (скрытые переменные). Обучение происходит градиентными методами (ADAM) с автоматическим поиском оптимальной топологии.
+Библиотека реализует оболочку **Black-White Graph (BWG)** — графовую GLM-модель над произвольными ядровыми функциями-экспертами. Вершины графа делятся на *белые* (с эталонными данными) и *чёрные* (скрытые переменные). Обучение — градиентными методами (ADAM) с автоматическим поиском оптимальной топологии. Поддерживается многоэтапный прямой проход (K > 1) с обратным распространением через этапы (BPTT) и векторным контекстом между этапами.
+
+---
+
+## Навигация
+
+- [Быстрый старт](#быстрый-старт)
+- [Структура проекта](#структура-проекта)
+- [Основные концепции](#основные-концепции)
+  - [Вершины (Node)](#вершины-node)
+  - [Рёбра (Edge)](#рёбра-edge)
+  - [Прямой проход (Forward)](#прямой-проход-forward)
+  - [Многоэтапный прямой проход (K > 1)](#многоэтапный-прямой-проход-k--1)
+  - [Обратный проход: функция потерь чёрной вершины](#обратный-проход-функция-потерь-чёрной-вершины)
+  - [BPTT: обратное распространение через этапы](#bptt-обратное-распространение-через-этапы)
+  - [Устойчивость](#устойчивость)
+- [Векторный контекст и ContextProjector](#векторный-контекст-и-contextprojector)
+- [Данные: формат BWMatrix](#данные-формат-bwmatrix)
+- [Обучение: Trainer + TrainingOptions](#обучение-trainer--trainingoptions)
+- [API: GraphShell](#api-graphshell---методы-манипуляции-топологией)
+- [API: полный справочник методов](#api-полный-справочник-методов)
+- [Эксперименты](#эксперименты)
+- [Результаты](#результаты)
+- [Технические аспекты](#технические-аспекты)
 
 ---
 
@@ -39,7 +62,7 @@ trainer = Trainer(model, opts);
 trainer.Train(X_train, Y_train, X_test, Y_test);
 ```
 
-> **Важно:** α генерируется через публичный метод `GenerateTopologyAwareAlpha(SafetyFactor)`, вызываемый **из конструктора `Trainer`**. Это гарантирует условие устойчивости: **Σα_in(v) < 1 + Σα_out(v)** для каждой вершины v. При использовании `GraphShell` без `Trainer` метод нужно вызвать вручную. Параметр `SafetyFactor` (по умолчанию 0.8) управляется через `TrainingOptions.AlphaSafetyFactor`. Внешний `AlphaGenerator` больше не требуется.
+> **Важно:** α генерируется через публичный метод `GenerateTopologyAwareAlpha(SafetyFactor)`, вызываемый **из конструктора `Trainer`**. Это гарантирует условие устойчивости: **Σα_in(v) < 1 + Σα_out(v)** для каждой вершины v. При использовании `GraphShell` без `Trainer` метод нужно вызвать вручную. Параметр `SafetyFactor` (по умолчанию 0.8) управляется через `TrainingOptions.AlphaSafetyFactor`.
 
 ---
 
@@ -50,7 +73,7 @@ MyGraphLib/
 │
 ├── +BWGraph/                              # Пространство имён модели
 │   ├── Edge.m                             # Ребро графа (α, β)
-│   ├── GraphShell.m                       # Оболочка графа (прямой проход, производные, топология)
+│   ├── GraphShell.m                       # Оболочка графа (Forward, BackpropContext, производные, топология)
 │   ├── Node.m                             # Вершина графа
 │   ├── NodeColor.m                        # Перечисление: White / Black
 │   │
@@ -67,16 +90,16 @@ MyGraphLib/
 │   │   └── HybridBetaGenerator.m          # Гибридный β-генератор
 │   │
 │   └── +Trainer/                          # Обучение
-│       ├── Trainer.m                      # Алгоритмы: градиентный спуск, плато, структурный поиск
+│       ├── Trainer.m                      # ADAM, BPTT, выход из плато, структурный поиск
 │       └── TrainingOptions.m              # Гиперпараметры обучения
 │
 ├── +coreFunctions/                        # Ядровые функции (ICoreF / ITunableCoreF)
-│   ├── ICoreF.m                           # Интерфейс ядровой функции
+│   ├── ICoreF.m                           # Интерфейс ядровой функции (+ контекст: SupportsContext, AugmentInput, CalcContextDerivative)
 │   ├── ITunableCoreF.m                    # Интерфейс настраиваемой функции
-│   ├── Heating2DModel.m                   # Модель нестационарной теплопроводности (2D)
+│   ├── ContextProjector.m                 # Проектор контекста (без собственного решателя, для multi-stage цепочек)
+│   ├── Heating2DModel.m                   # Модель нестационарной теплопроводности (2D) с поддержкой контекста
 │   ├── Heating2DTunableModel.m            # Настраиваемая модель нагрева
 │   ├── Heating2DWithRolling.m             # Модель нагрева с прокаткой
-│   ├── PlateHeatingModel.m                # Пластина
 │   ├── LinearFunction.m                   # Линейная: y = ax + b
 │   ├── LinearRegression.m                 # Линейная регрессия
 │   ├── SigmoidFunction.m                  # Сигмоида
@@ -84,19 +107,23 @@ MyGraphLib/
 │   ├── HeatLinearRegression.m             # Линейная регрессия + тепло
 │   └── SimpleAddingCoreFunction.m         # Простое сложение входов
 │
-├── Exps/                                  # Эксперименты (~15 скриптов)
+├── Exps/                                  # Эксперименты
 │   ├── ExpHeat.m                          # Базовая модель нагрева
 │   ├── ExpHeatRealData.m                  # Нагрев на реальных данных
 │   ├── ExpHeatRealDataTunable.m           # Настраиваемая модель + реальные данные
 │   ├── ExpHeatRealData_Structural.m       # Структурный поиск на реальных данных
 │   ├── ExpHeatOldData.m                   # Старые данные нагрева
 │   ├── ExpHeatWith2Dim.m                  # Двумерный вход
+│   ├── ExpHeatWithHiddenCore.m            # Скрытое ядро (K > 1, цепочка с контекстом)
+│   ├── ExpWith2Dim3Vertices.m             # 3 вершины, 2D-вход, multi-stage
 │   ├── ExpLinear.m, ExpLinearTwoX.m       # Линейные эксперименты
+│   ├── ExpLinear2026.m                    # Линейный эксперимент 2026
 │   ├── ExpSigmoid.m                       # Сигмоидные ядра
 │   ├── ExpSimpleData.m                    # Простые данные
 │   ├── ExpTunableVerification.m           # Верификация настраиваемых функций
 │   ├── ExpVerificationTheorem.m           # Численная проверка теоремы о декомпозиции
 │   ├── ExpStructuralSearchTest.m          # Тест жадного NAS
+│   ├── ExpStructuralSearchTest3Vertices.m # Тест жадного NAS на 3 вершинах
 │   ├── ExpScrypt.m                        # Вспомогательный скрипт
 │   └── NonlinearExps/FirstExp.m           # Нелинейный эксперимент
 │
@@ -116,6 +143,7 @@ MyGraphLib/
 | `NodeFunction` | `ICoreF` | Ядровая функция (может быть `[]` для чёрных вершин) |
 | `ActivationType` | `"linear"` / `"sigmoid"` / `"relu"` / `"tanh"` | Функция активации после `γ·CoreFunction` |
 | `Gamma` | `double` | Мультипликативный вес ядра |
+| `GammaCtx` | `double` (default=1) | Вес контекста от предыдущего этапа (K > 1) |
 | `FResult` | `double` | Текущее значение в вершине (вычисляется `Forward`-проходом) |
 
 Формула вершины (до применения активации):
@@ -123,6 +151,8 @@ MyGraphLib/
 $$F_v = \sigma\left(\gamma_v \cdot f_v(x_v) + \sum_{u \in \text{In}(v)} \bigl(\alpha_{u \to v} \cdot F_u + \beta_{u \to v}\bigr)\right)$$
 
 где σ — функция активации, f_v — ядровая функция, In(v) — входящие в v рёбра.
+
+При K > 1 вход ядровой функции расширяется контекстом: `f_v(AugmentInput(x_v, ctx_vec))`, где `ctx_vec` — вектор F-значений входящих соседей с предыдущего этапа, масштабированный на `GammaCtx`.
 
 ### Рёбра (`Edge`)
 
@@ -154,6 +184,20 @@ $$F_v = \frac{L_v + G_{\text{in}}(v) - \sum_{e \in \text{Out}(v)} \beta_e}{1 + \
 **Кеширование:** M⁻¹ = (D − A_in)⁻¹ и const = B_in − B_out не зависят от входных данных x — вычисляются **один раз** при изменении параметров рёбер и переиспользуются между сэмплами. Ускорение ~10×.
 - **Кеширование `CalcCoreFunction`:** результат f_v(x_v) кешируется в `Node` между вызовами с одинаковыми входными данными.
 
+### Многоэтапный прямой проход (K > 1)
+
+При `GraphShell.NumStages > 1` (задаётся через `TrainingOptions.ContextStages`) выполняется K итераций прямого прохода:
+
+1. **Этап 1:** классический плоский проход (без контекста)
+2. **Этапы 2…K:** для каждой вершины, чей солвер поддерживает контекст (`SupportsContext() = true`), вход расширяется вектором F-значений входящих соседей с предыдущего этапа:
+   ```
+   ctx_vec = GammaCtx × F_prev(incoming_neighbors)
+   augInput = AugmentInput(baseInput, ctx_vec)
+   ```
+3. На каждом этапе сохраняются промежуточные значения (F_vector, ctx_store, raw_store) для последующего BPTT.
+
+K=1 — классический плоский режим с нулевым оверхедом (fast path в `Forward`).
+
 ### Обратный проход: функция потерь чёрной вершины
 
 Для чёрной вершины полная невязка складывается из структурной и собственной составляющих:
@@ -166,9 +210,52 @@ $$\tilde{F}_b = \frac{G_{in}(b) - \sum_{e \in Out(b)} \beta_e}{\sum_{e \in Out(b
 
 При Σα_out = 0 теневое значение не определено — J_self = 0.
 
+### BPTT: обратное распространение через этапы
+
+При K > 1 градиент параметра `GammaCtx` вычисляется обратным распространением через сохранённые этапы (`GraphShell.BackpropContext`):
+
+1. Начиная с финального этапа K, для каждого этапа s = K…2:
+   - `∂Core_i/∂ctx` — через `CalcContextDerivative` (аналитически или конечной разностью)
+   - `∂L_i/∂ctx = act'(raw) × γ_i × ∂Core/∂ctx`
+   - `∂F_i/∂ctx = M_inv(i,i) × ∂L_i/∂ctx`
+   - Градиент `GammaCtx`: `d(ctx_j)/dGammaCtx = ctx_j / GammaCtx`
+   - Пропагация на F_prev: `d(ctx_j)/dF_prev(src) = GammaCtx`
+2. Градиенты суммируются по всем этапам.
+
 ### Устойчивость
 
 Жёсткое ограничение после каждого ADAM-шага: для каждой вершины v, если Σα_in(v) ≥ 1+Σα_out(v), все входящие α масштабируются с коэффициентом `StabilityClampFactor × (1+Σα_out) / Σα_in`. По умолчанию StabilityClampFactor = 0.99.
+
+---
+
+## Векторный контекст и ContextProjector
+
+### Интерфейс контекста в `ICoreF`
+
+Базовый класс `ICoreF` предоставляет три метода для поддержки многоэтапного прохода:
+
+| Метод | По умолчанию | Описание |
+|---|---|---|
+| `SupportsContext()` | `false` | Может ли солвер использовать контекст от предыдущего этапа |
+| `AugmentInput(baseInput, ctx_vec)` | `baseInput` | Расширяет входной вектор контекстом |
+| `CalcContextDerivative(baseInput, ctx_vec)` | конечная разность | Производная `CalcCoreFunction` по вектору контекста (вектор-строка) |
+
+**Реализация в `Heating2DModel`:**
+- `SupportsContext → true`
+- `AugmentInput` добавляет `ctx_vec(1)` как T₀ (начальную температуру)
+- `CalcContextDerivative` возвращает `[1, 0, …, 0]` (dTavg/dT₀ = 1)
+
+### ContextProjector
+
+Специальная ядровая функция без собственного решателя — используется как промежуточный узел в многоэтапных цепочках:
+
+- `CalcCoreFunction` возвращает первый элемент входного вектора (или 0, если вход пуст)
+- `AugmentInput` возвращает вектор контекста, игнорируя базовый вход
+- `CalcContextDerivative` возвращает единичную матрицу (identity)
+
+**Типовая топология:** `A(решатель) → Proj(контекст) → B(решатель) → …`
+
+Proj-вершина пропускает через себя F-значения входящих соседей, позволяя следующему решателю получить контекст от предыдущего этапа цепочки.
 
 ---
 
@@ -212,6 +299,7 @@ data = readtable("file.xlsx", VariableNamingRule="preserve");
 | `Epoches` | 100 | Максимальное число эпох |
 | `BatchSize` | 1 | Размер батча |
 | `TargetError` | 1e-5 | Целевая ошибка (ранняя остановка) |
+| `ContextStages` | 1 | Количество этапов Forward (K). K=1 — классический режим |
 | **ADAM** |||
 | `Beta1` | 0.9 | Затухание первого момента |
 | `Beta2` | 0.999 | Затухание второго момента |
@@ -226,7 +314,7 @@ data = readtable("file.xlsx", VariableNamingRule="preserve");
 | **Регуляризация** |||
 | `Lambda_Alph` | 0.01 | L2-регуляризация α |
 | `Lambda_Beta` | 0.01 | L2-регуляризация β |
-| `Lambda_Gamma` | 0.01 | L2-регуляризация γ |
+| `Lambda_Gamma` | 0.01 | L2-регуляризация γ (и GammaCtx при K>1) |
 | `Lambda_Agg` | 0 | Штраф агрегации ошибок |
 | `Lambda_Self` | 0 | Собственная регуляризация |
 | `Lambda_Struct` | 0 | Структурная регуляризация |
@@ -259,7 +347,7 @@ data = readtable("file.xlsx", VariableNamingRule="preserve");
 ### Алгоритм 1: Выход из плато (Plateau Escape)
 
 При застревании (отсутствие улучшения `p_e` эпох подряд):
-1. К параметрам применяется случайное смещение (`RpShiftPercent`% от текущих значений)
+1. К параметрам применяется случайное смещение (`RpShiftPercent`% от текущих значений, включая `GammaCtx`)
 2. LR сбрасывается до начального
 3. Максимум `p_p` попыток, затем остановка
 
@@ -267,8 +355,12 @@ LR-шедулинг: **η_epoch = η_init / √epoch** — затухание п
 
 ### Алгоритм 2: Структурный поиск (Greedy NAS)
 
+Двухфазный поиск:
+1. **Фаза 1 (белые вершины):** добавление рёбер только к белым вершинам
+2. **Фаза 2 (чёрные вершины):** добавление рёбер к чёрным вершинам
+
 Каждые `StructuralSearchInterval` эпох:
-1. Генерируются кандидаты — отсутствующие рёбра между всеми вершинами
+1. Генерируются кандидаты — отсутствующие рёбра
 2. Каждый кандидат быстро настраивается (`StructuralSearchEpochs` эпох)
 3. Лучший кандидат (по ошибке на тесте) добавляется в граф
 4. Глобальный кеш (`globalEdgeCache`) исключает повторную проверку отклонённых рёбер
@@ -277,12 +369,9 @@ LR-шедулинг: **η_epoch = η_init / √epoch** — затухание п
 ### Визуализация обучения
 
 Дашборд 3×3 в реальном времени:
-- Ошибки train/test (с маркерами структурных изменений)
-- Learning rate
-- Время эпохи
-- Разница ошибок (early stopping)
-- Матрица смежности (текущая топология)
-- Визуальный граф (α, β, γ на рёбрах)
+- **Строка 1:** ошибки train/test (с маркерами структурных изменений), learning rate, матрица смежности
+- **Строка 2:** время эпохи, разница ошибок (early stopping), таблица вершин (γ, γ_C при K>1)
+- **Строка 3:** таблица рёбер (α, β), визуальный граф (чистый, без таблиц)
 
 ---
 
@@ -310,7 +399,8 @@ model.invalidateForwardCache()                       % Сбросить кеш �
 |---|---|
 | `GraphShell(BetaGenerator, NodeWeight, ...Node)` | Конструктор. β-генератор, веса, вершины |
 | `LoadFromFile(filename)` *(static)* | Загрузить граф из .mat |
-| `Forward(Data)` | Прямой проход, обновляет `FResult` |
+| `Forward(Data)` | Прямой проход (K=1 — классический, K>1 — многоэтапный), обновляет `FResult` |
+| `BackpropContext(dF_final)` | BPTT: градиент `GammaCtx` через этапы (K>1) |
 | `GetCurrentResult(XData)` | Прямой проход → вектор результатов |
 | `GetModelResults()` | Текущие `FResult` всех вершин |
 | `GetNumOfWhiteNode()` / `GetNumOfBlackNode()` | Количество белых/чёрных |
@@ -323,36 +413,34 @@ model.invalidateForwardCache()                       % Сбросить кеш �
 | `computeGammaDerivativeForNode(idx, data)` | ∂F/∂γ для вершины |
 | `computeOutgoingAlphaDerivativeForEdge(idx)` | ∂F/∂α исходящего ребра |
 | `computeOutgoingBetaDerivativeForEdge(idx)` | ∂F/∂β исходящего ребра |
-| `DrawGraph_New(titleStr, ax)` | Визуализация графа (опционально на заданных осях) |
+| `DrawGraph_New(titleStr, ax, hideEdgeLabels)` | Визуализация графа. 4-й параметр скрывает метки рёбер |
+| `DrawNodeTable(ax)` | Таблица параметров вершин (γ, γ_C) на заданных осях |
+| `DrawEdgeTable(ax)` | Таблица параметров рёбер (α, β) на заданных осях |
+| `DrawParamTables(ax)` | Таблица вершин в углу графика (для standalone-режима) |
 | `GenerateTopologyAwareAlpha(SafetyFactor)` | Генерация α с гарантией устойчивости (публичный) |
-| `invalidateForwardCache()` | Сброс кеша M⁻¹ |
+| `invalidateForwardCache()` | Сброс кеша M⁻¹ и BPTT-кеша |
 | `addEdgeBetween(src, dst, α, β)` | Добавить направленное ребро |
 | `removeEdgeBetween(src, dst)` | Удалить направленное ребро |
 | `hasEdge(src, dst)` | Проверить существование ребра |
-| `numEdges()` | Количество рёбер |
-| `getAdjacencyMatrix()` | Матрица смежности N×N |
+| `getPossibleEdges()` | Все пары (i,j) без ребра |
+| `getExistingEdges()` | Все существующие рёбра |
+| `getTotalEdgeCount()` | Общее количество рёбер |
+| `getEdgeParams(src, dst)` | Параметры (α, β) ребра |
+| `generateEdgeParams()` | Сгенерировать (α, β) теми же генераторами |
+| `checkStability()` | Проверить условие устойчивости для всех вершин |
+| `clone()` | Глубокая копия графа |
 
-### `Trainer`
-
-| Метод | Описание |
+**Свойства:**
+| Свойство | Описание |
 |---|---|
-| `Trainer(Graph, TrainingOptions)` | Конструктор |
-| `Train(X_train, Y_train, X_test, Y_test)` | Обучение (основной цикл) |
-| `GetGraph()` | Вернуть граф |
-| `SaveBestParameters()` | Сохранить лучшие параметры |
-| `RestoreBestParameters()` | Восстановить лучшие параметры |
-| `RandomShiftParameters()` | RpShift-оператор (выход из плато) |
-| `CalculateError(X, Y, indices, metric)` | Вычислить ошибку |
-| `ResetTrainingState()` | Сброс состояния (новый запуск) |
-| `StructuralSearchStep(...)` | Один шаг жадного NAS |
-| `CleanupRedundantEdges(...)` | Зачистка рёбер после конвергенции |
-| `UpdateStructuralPlot(ax)` | Обновить матрицу смежности на дашборде |
+| `NumStages` | Количество этапов Forward (K). По умолчанию 1 |
+| `ListOfNodes` | Вектор всех узлов |
 
 ### `Node`
 
 | Метод | Описание |
 |---|---|
-| `Node(ID, initVal, nodeType, nodeFunction)` | Конструктор |
+| `Node(ID, initVal, nodeType, nodeFunction, activationType)` | Конструктор |
 | `addEdge(targetNode)` | Добавить исходящее ребро |
 | `removeEdgeByTarget(targetNode)` | Удалить ребро |
 | `getEdgeToTarget(targetNode)` | Получить ребро |
@@ -360,10 +448,20 @@ model.invalidateForwardCache()                       % Сбросить кеш �
 | `getNeighbors()` | Соседи |
 | `calcNodeFunc(inputData)` | γ·CoreFunction → activation |
 | `calcRawCoreFunction(inputData)` | CoreFunction (с кешированием) |
+| `computeLGammaDerivative(inputData)` | ∂L/∂γ |
 | `getFResult()` / `setFResult(v)` | Текущее значение |
 | `getNodeType()` | `White` / `Black` |
 | `getNodeFunction()` | Ядровая функция |
 | `getActivationType()` | Тип активации |
+| `getActivationDerivative(raw)` | Производная активации по raw |
+
+**Свойства:**
+| Свойство | По умолчанию | Описание |
+|---|---|---|
+| `ID` | — | Номер вершины |
+| `Gamma` | 1 | Вес выхода CoreFunction |
+| `GammaCtx` | 1 | Вес контекста (multi-stage, K>1) |
+| `ActivationType` | `"linear"` | Тип нелинейности |
 
 ### `Edge`
 
@@ -373,6 +471,16 @@ model.invalidateForwardCache()                       % Сбросить кеш �
 | `Beta` | Аддитивное смещение β |
 | `SourceNode` / `TargetNode` | Вершины |
 | `ID` | Идентификатор |
+
+### `ICoreF` (интерфейс ядровой функции)
+
+| Метод | Описание |
+|---|---|
+| `CalcCoreFunction(InputParams)` | Вычислить ядровую функцию |
+| `GetNumOfInputParams()` | Количество входных параметров |
+| `SupportsContext()` | Поддерживает ли контекст (default: false) |
+| `AugmentInput(baseInput, ctx_vec)` | Расширить вход контекстом (default: baseInput) |
+| `CalcContextDerivative(baseInput, ctx_vec)` | ∂Core/∂ctx — вектор-строка (default: конечная разность) |
 
 ---
 
@@ -388,12 +496,27 @@ run("Exps/ExpHeatRealData.m")
 Базовые сценарии:
 - **ExpHeat / ExpHeatRealData** — модель нагрева, синтетика / реальные данные
 - **ExpHeatRealData_Structural** — структурный поиск на реальных данных
-- **ExpStructuralSearchTest** — тест жадного NAS на синтетике
+- **ExpHeatWithHiddenCore** — скрытое ядро, многоэтапный проход (K > 1), цепочка с контекстом
+- **ExpWith2Dim3Vertices** — 3 вершины, 2D-вход, multi-stage с BPTT
+- **ExpStructuralSearchTest / ExpStructuralSearchTest3Vertices** — тест жадного NAS
 - **ExpVerificationTheorem** — численная проверка теоремы о декомпозиции C_{b→w}
 - **ExpHeatWith2Dim** — двумерный вход (t, Tinf)
-- **ExpLinear / ExpLinearTwoX** — линейные ядра
+- **ExpLinear / ExpLinearTwoX / ExpLinear2026** — линейные ядра
 - **ExpSigmoid** — сигмоидная активация
 - **ExpTunableVerification** — настраиваемые ядровые функции (ITunableCoreF)
+
+---
+
+## Результаты
+
+На задаче последовательного моделирования (T₀-цепочка, 3 вершины, K=3 этапа) модель BW Graph показала:
+
+| Метрика | BW Graph (K=3) | Gradient Boosting |
+|---|---|---|
+| R² | **0.9877** | 0.8582 |
+| MAE | **9.0** | 29.9 |
+
+Многоэтапный проход с BPTT и векторным контекстом позволяет модели улавливать зависимость от начальных условий (T₀), передаваемую через этапы цепочки.
 
 ---
 
@@ -403,13 +526,11 @@ run("Exps/ExpHeatRealData.m")
 - Мультипликативные (γ) и аддитивные (β) зависимости между ядрами
 - Линейные коэффициенты передачи (α) с гарантией устойчивости
 - Нелинейные активации: `linear`, `sigmoid`, `relu`, `tanh`
-- ADAM-оптимизатор с раздельным клиппингом и автокалибровкой
-- Механизм выхода из плато (RpShift)
-- Жадный структурный поиск (NAS) с глобальным кешем
-- Кеширование прямого прохода и ядровых функций
+- ADAM-оптимизатор с раздельным клиппингом (α, β, γ, GammaCtx) и автокалибровкой
+- Многоэтапный прямой проход (K > 1) с векторным контекстом между этапами
+- BPTT (обратное распространение через этапы) для обучения `GammaCtx`
+- `ContextProjector` — ядровая функция-проектор для цепочек без собственного решателя
+- Механизм выхода из плато (RpShift) с поддержкой `GammaCtx`
+- Жадный структурный поиск (NAS) с двухфазной стратегией и глобальным кешем
+- Кеширование прямого прохода (M⁻¹), ядровых функций и промежуточных BPTT-состояний
 - Сохранение/загрузка модели через `LoadFromFile`
-
-**В плане:**
-- Векторизация внутренних циклов
-- Поддержка GPU (через `gpuArray`)
-- Поддержка batch-режима (BatchSize > 1)
