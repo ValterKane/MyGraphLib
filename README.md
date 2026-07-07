@@ -146,11 +146,11 @@ MyGraphLib/
 | `GammaCtx` | `double` (default=1) | Вес контекста от предыдущего этапа (K > 1) |
 | `FResult` | `double` | Текущее значение в вершине (вычисляется `Forward`-проходом) |
 
-Формула вершины (до применения активации):
+Активация применяется только к выходу ядровой функции:
 
-$$F_v = \sigma\left(\gamma_v \cdot f_v(x_v) + \sum_{u \in \text{In}(v)} \bigl(\alpha_{u \to v} \cdot F_u + \beta_{u \to v}\bigr)\right)$$
+$$L_v = \sigma(\gamma_v \cdot f_v(x_v))$$
 
-где σ — функция активации, f_v — ядровая функция, In(v) — входящие в v рёбра.
+где σ — функция активации, f_v — ядровая функция. L_v входит в систему линейных уравнений прямого прохода (см. ниже). Вклады входящих рёбер добавляются линейно, без активации.
 
 При K > 1 вход ядровой функции расширяется контекстом: `f_v(AugmentInput(x_v, ctx_vec))`, где `ctx_vec` — вектор F-значений входящих соседей с предыдущего этапа, масштабированный на `GammaCtx`.
 
@@ -169,34 +169,44 @@ $$\sum_{e \in \text{In}(v)} \alpha_e \;<\; 1 + \sum_{e \in \text{Out}(v)} \alpha
 
 ### Прямой проход (`Forward`)
 
-Система уравнений для всех N вершин:
+Для каждой вершины v состояние F_v определяется балансом между активированным выходом ядровой функции и агрегированным сигналом соседей:
 
-$$F_v = \frac{L_v + G_{\text{in}}(v) - \sum_{e \in \text{Out}(v)} \beta_e}{1 + \sum_{e \in \text{Out}(v)} \alpha_e}, \quad v = 1,\dots,N$$
+$$F_v = \frac{\tilde{L}_v + G_{In}(v) - \displaystyle\sum_{e \in E_{Out}(v)} \beta_e}{D(v)}, \qquad D(v) = 1 + \sum_{e \in E_{Out}(v)} \alpha_e$$
 
-где L_v = γ_v · f_v(x_v), G_in(v) = Σ(α_e·F_u + β_e) — вклад входящих рёбер.
+где $\tilde{L}_v = \sigma_v(\gamma_v \cdot f_v(X[v]))$ — активированный выход ядра, $G_{In}(v) = \sum_{e(u \to v)} (\alpha_e \cdot F_u + \beta_e)$ — агрегированный сигнал от входящих соседей.
 
-**Матричная форма:** **(D − A_in) · Φ = L + B_in − B_out**
+**Матричная форма:** **(D − A_in) · F = L̃ + B_in − B_out**
 
-- D — диагональная: D_{ii} = 1 + Σα_out(i)
-- A_in — матрица входящих α: (A_in)_{ij} = α_{j→i}
+- D = diag(D(v)) — диагональная матрица знаменателей
+- (A_in)_{ij} = α_{j→i} — матрица входящих α
 - B_in, B_out — вектора сумм β по входящим/исходящим рёбрам
+- L̃ — вектор активированных выходов ядер
 
-**Кеширование:** M⁻¹ = (D − A_in)⁻¹ и const = B_in − B_out не зависят от входных данных x — вычисляются **один раз** при изменении параметров рёбер и переиспользуются между сэмплами. Ускорение ~10×.
-- **Кеширование `CalcCoreFunction`:** результат f_v(x_v) кешируется в `Node` между вызовами с одинаковыми входными данными.
+Решение: **F = (D − A_in)⁻¹ · (L̃ + B_in − B_out)**
+
+**Кеширование:** M⁻¹ = (D − A_in)⁻¹ и const = B_in − B_out не зависят от входных данных — вычисляются **один раз** при изменении параметров рёбер и переиспользуются между сэмплами. Ускорение ~10×. Результат `CalcCoreFunction` также кешируется в `Node` между вызовами с одинаковыми входными данными.
 
 ### Многоэтапный прямой проход (K > 1)
 
-При `GraphShell.NumStages > 1` (задаётся через `TrainingOptions.ContextStages`) выполняется K итераций прямого прохода:
+При `GraphShell.NumStages > 1` (задаётся через `TrainingOptions.ContextStages`) выполняется K итераций прямого прохода с контекстной пропагацией:
 
-1. **Этап 1:** классический плоский проход (без контекста)
-2. **Этапы 2…K:** для каждой вершины, чей солвер поддерживает контекст (`SupportsContext() = true`), вход расширяется вектором F-значений входящих соседей с предыдущего этапа:
-   ```
-   ctx_vec = GammaCtx × F_prev(incoming_neighbors)
-   augInput = AugmentInput(baseInput, ctx_vec)
-   ```
-3. На каждом этапе сохраняются промежуточные значения (F_vector, ctx_store, raw_store) для последующего BPTT.
+**Плоский случай (K = 1):**
+$$\mathbf{F} = (\mathbf{D} - \mathbf{A}_{in})^{-1} \bigl( \widetilde{\mathbf{L}} + \mathbf{B}_{in} - \mathbf{B}_{out} \bigr), \qquad \tilde{L}_v = \sigma_v(\gamma_v \cdot f_v(X[v]))$$
 
-K=1 — классический плоский режим с нулевым оверхедом (fast path в `Forward`).
+**Этап 1 (k = 1):** совпадает с плоским проходом. Вычисляется F⁽¹⁾.
+
+**Этапы k = 2…K:** для каждой вершины v вычисляется вектор контекста из состояний входящих соседей с предыдущего этапа:
+$$\mathbf{c}_v^{(k)} = \gamma^{Ctx}_v \cdot \bigl( F_{u_1}^{(k-1)}, \; F_{u_2}^{(k-1)}, \; \dots, \; F_{u_m}^{(k-1)} \bigr)^T \in \mathbb{R}^m$$
+
+где m = |In(v)|, $\gamma^{Ctx}_v$ — обучаемый вес контекста (свойство `Node.GammaCtx`). Вход ядровой функции расширяется:
+$$\tilde{L}_v^{(k)} = \sigma_v\bigl( \gamma_v \cdot f_v( \mathcal{A}_v(X[v], \mathbf{c}_v^{(k)}) ) \bigr)$$
+
+где $\mathcal{A}_v$ = `AugmentInput` — оператор дополнения входа. Затем решается та же линейная система:
+$$\mathbf{F}^{(k)} = (\mathbf{D} - \mathbf{A}_{in})^{-1} \bigl( \widetilde{\mathbf{L}}^{(k)} + \mathbf{B}_{in} - \mathbf{B}_{out} \bigr)$$
+
+Финальное состояние: $\mathbf{F} = \mathbf{F}^{(K)}$.
+
+На каждом этапе сохраняются промежуточные значения (`F_vector`, `ctx_store`, `raw_store`) для последующего BPTT. Матрица (D − A_in)⁻¹ факторизуется однократно и переиспользуется на всех этапах.
 
 ### Обратный проход: функция потерь чёрной вершины
 
@@ -212,15 +222,31 @@ $$\tilde{F}_b = \frac{G_{in}(b) - \sum_{e \in Out(b)} \beta_e}{\sum_{e \in Out(b
 
 ### BPTT: обратное распространение через этапы
 
-При K > 1 градиент параметра `GammaCtx` вычисляется обратным распространением через сохранённые этапы (`GraphShell.BackpropContext`):
+При K > 1 градиент по $\gamma^{Ctx}_v$ получает дополнительные BPTT-слагаемые, отсутствующие в плоской модели:
 
-1. Начиная с финального этапа K, для каждого этапа s = K…2:
-   - `∂Core_i/∂ctx` — через `CalcContextDerivative` (аналитически или конечной разностью)
-   - `∂L_i/∂ctx = act'(raw) × γ_i × ∂Core/∂ctx`
-   - `∂F_i/∂ctx = M_inv(i,i) × ∂L_i/∂ctx`
-   - Градиент `GammaCtx`: `d(ctx_j)/dGammaCtx = ctx_j / GammaCtx`
-   - Пропагация на F_prev: `d(ctx_j)/dF_prev(src) = GammaCtx`
-2. Градиенты суммируются по всем этапам.
+$$\frac{\partial J}{\partial \gamma^{Ctx}_v} = \sum_{k=2}^{K} \; \frac{\partial J}{\partial F^{(K)}} \cdot \frac{\partial F^{(K)}}{\partial F_v^{(k)}} \cdot \frac{\partial F_v^{(k)}}{\partial \mathbf{c}_v^{(k)}} \cdot \frac{\partial \mathbf{c}_v^{(k)}}{\partial \gamma^{Ctx}_v}$$
+
+Сомножители раскрываются:
+
+$$\frac{\partial F_v^{(k)}}{\partial \mathbf{c}_v^{(k)}} = [(\mathbf{D} - \mathbf{A}_{in})^{-1}]_{vv} \cdot \gamma_v \cdot \sigma_v'(z_v^{(k)}) \cdot \frac{\partial f_v}{\partial \mathbf{c}_v^{(k)}}$$
+
+$$\frac{\partial \mathbf{c}_v^{(k)}}{\partial \gamma^{Ctx}_v} = \bigl( F_{u_1}^{(k-1)}, \dots, F_{u_m}^{(k-1)} \bigr)^T, \qquad \frac{\partial \mathbf{c}_v^{(k)}}{\partial F_{u_j}^{(k-1)}} = \gamma^{Ctx}_v \cdot \mathbf{e}_j$$
+
+Производная $\partial f_v / \partial \mathbf{c}_v^{(k)}$ вычисляется через `ICoreF.CalcContextDerivative` (аналитически или центральной конечной разностью).
+
+Алгоритм BPTT в `GraphShell.BackpropContext(J_total)`:
+1. Начальное состояние: `dF = J_total` (градиент финальной ошибки по F каждой вершины)
+2. Для этапов s = K…2:
+   - Для каждой вершины i: `dL_i = dF(i) × [(D − A_in)⁻¹]_{ii}` — пропагация через линейную систему
+   - `d_raw_i = dL_i × σ'(raw_store[i])` — через активацию
+   - `dCore_dctx` = `node.CalcContextDerivative(baseInput, ctx_store[i])` — через ядро
+   - `dL_dctx_i = d_raw_i × γ_i × dCore_dctx` — градиент L по контексту
+   - `dF_dctx_i = dL_dctx_i × [(D − A_in)⁻¹]_{ii}` — пропагация на F
+   - Градиент GammaCtx: `∇γCtx_i += dF_dctx_i · ctx_store[i] / γCtx_i`
+   - Пропагация на F предыдущего этапа: `dF_prev(src) += γCtx_i × dF_dctx_i(j)` для каждого j-го соседа
+3. Возврат `∇γCtx` — вектор градиентов для всех вершин
+
+При K = 1 сумма в формуле градиента пуста, и BPTT-поправки тождественно равны нулю — многоэтапная модель является строгим обобщением плоской.
 
 ### Устойчивость
 
