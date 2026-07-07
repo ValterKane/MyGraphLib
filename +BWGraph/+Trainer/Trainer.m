@@ -23,11 +23,14 @@ classdef Trainer < handle
         vBt
         mGm
         vGm
+        mGmCtx
+        vGmCtx
         t
         % Параметры
         bestAl                     % Лучшие альфа-значения по результатам настройки
         bestBt                     % Лучшие бета-значения по результатам настройки
         bestGm                     % Лучшие gamma-значения по результатам настройки
+        bestGmCtx                  % Лучшие GammaCtx-значения
         
         % Остальные параметры 
         graph                   BWGraph.GraphShell    % Графовая модель
@@ -62,6 +65,8 @@ classdef Trainer < handle
         calibratedClipDownBt (1,1) double = 0
         calibratedClipUpGm   (1,1) double = 0
         calibratedClipDownGm (1,1) double = 0
+        calibratedClipUpGmCtx   (1,1) double = 0
+        calibratedClipDownGmCtx (1,1) double = 0
         % Структурный поиск: визуализация
         rejectedEdges           % Матрица [N×2] отклонённых рёбер (src, dst) за текущий шаг
         % Глобальный кеш проверенных рёбер (между шагами поиска)
@@ -82,6 +87,9 @@ classdef Trainer < handle
             obj.nodes = Graph.ListOfNodes;
             obj.TrainingOptions = TrainingOptions;
 
+            % Многоэтапный Forward (по умолчанию 1 — классический режим)
+            obj.graph.NumStages = TrainingOptions.ContextStages;
+
             % Генерация α с учётом топологии через публичный метод GraphShell
             obj.graph.GenerateTopologyAwareAlpha(TrainingOptions.AlphaSafetyFactor);
 
@@ -93,6 +101,7 @@ classdef Trainer < handle
             obj.bestAl = zeros(numNodes, numNodes);
             obj.bestBt = zeros(numNodes, numNodes);
             obj.bestGm = zeros(numNodes);
+            obj.bestGmCtx = zeros(numNodes);
 
             % Заполняем начальными значениями
             for i = 1:numNodes
@@ -159,12 +168,13 @@ classdef Trainer < handle
             ax1 = subplot(3,3,[1,2]);  % Ошибки (широкий)
             ax2 = subplot(3,3,3);      % LR
             ax3 = subplot(3,3,[4,5]);  % Время эпохи (широкий)
-            ax4 = subplot(3,3,6);      % Разница ошибок
-            ax5 = subplot(3,3,7);      % Матрица смежности
-            ax6 = subplot(3,3,[8,9]);  % Визуальный граф
+            ax4 = subplot(3,3,6);      % Матрица смежности
+            ax5 = subplot(3,3,7);      % Таблица вершин (gamma, gCtx)
+            ax6 = subplot(3,3,8);      % Таблица рёбер (alpha, beta)
+            ax7 = subplot(3,3,9);      % Визуальный граф
             obj.rejectedEdges = zeros(0, 2);
-            obj.UpdateStructuralPlot(ax5);
-            obj.graph.DrawGraph_New([], ax6);
+            obj.UpdateStructuralPlot(ax4);
+            obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
 
             fprintf('Старт процесса настройки. ЦФ=%s, Метрика=%s\n', obj.TrainingOptions.LossFunction, obj.TrainingOptions.ErrorMetric);
 
@@ -298,20 +308,8 @@ classdef Trainer < handle
                 ylabel(ax3, 'Время (сек)');
                 grid(ax3, 'on');
 
-                % График разницы между ошибками
-                plot(ax4, 1:epoch, errorDiffs(1:epoch), 'm-', 'LineWidth', 1.5);
-                hold(ax4, 'on');
-                % Линия нуля для reference
-                plot(ax4, [1 epoch], [0 0], 'k--', 'LineWidth', 1);
-                hold(ax4, 'off');
-                title(ax4, 'Разница между ошибками L_{test} и L_{train}');
-                xlabel(ax4, 'Итерация');
-                ylabel(ax4, '\Delta E');
-                legend(ax4, {'Разница ошибок', 'Нулевая линия'}, 'Location', 'best');
-                grid(ax4, 'on');
-
                 % Обновление визуального графа (текущие α, β, γ после обучения)
-                obj.graph.DrawGraph_New([], ax6);
+                obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
 
                 drawnow; % Обновляем графики
 
@@ -325,8 +323,8 @@ classdef Trainer < handle
                    mod(epoch, obj.TrainingOptions.StructuralSearchInterval) == 0
                     fprintf('\n[Структурная оптимизация] Поиск оптимальной топологии (эпоха %d)...\n', epoch);
                     topologyChanged = obj.StructuralSearchStep(XDataTrain, YDataTrain, XDataTest, YDataTest);
-                    obj.UpdateStructuralPlot(ax5);
-                    obj.graph.DrawGraph_New([], ax6);
+                    obj.UpdateStructuralPlot(ax4);
+                    obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
                     if topologyChanged
                         obj.nodes = obj.graph.ListOfNodes;
                         topologyChangedEpochs(end+1) = epoch;
@@ -366,17 +364,8 @@ classdef Trainer < handle
             ylabel(ax3, 'Время (сек)');
             grid(ax3, 'on');
 
-            plot(ax4, 1:epoch, errorDiffs(1:epoch), 'm-', 'LineWidth', 1.5);
-            hold(ax4, 'on');
-            plot(ax4, [1 epoch], [0 0], 'k--', 'LineWidth', 1);
-            hold(ax4, 'off');
-            title(ax4, '\Delta E (test - train)');
-            xlabel(ax4, 'Итерация');
-            ylabel(ax4, '\Delta');
-            grid(ax4, 'on');
-
-            obj.UpdateStructuralPlot(ax5);
-            obj.graph.DrawGraph_New([], ax6);
+            obj.UpdateStructuralPlot(ax4);
+            obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
 
             sgtitle(sprintf('Обучение завершено (эпоха %d). Лучшая %s: %.4f', ...
                 epoch, obj.TrainingOptions.ErrorMetric, obj.bestTestError));
@@ -398,12 +387,14 @@ classdef Trainer < handle
             obj.bestAl = zeros(numNodes, numNodes);
             obj.bestBt = zeros(numNodes, numNodes);
             obj.bestGm = zeros(numNodes);
+            obj.bestGmCtx = zeros(numNodes);
 
             % Сохраняем текущие значения
             for i = 1:numNodes
                 node = obj.nodes(i);
                 edges = node.getOutEdges();
                 obj.bestGm(i) = node.Gamma;
+                obj.bestGmCtx(i) = node.GammaCtx;
                 for j = 1:numel(edges)
                     edge = edges(j);
                     targetId = edge.TargetNode.ID;
@@ -420,6 +411,7 @@ classdef Trainer < handle
                 node = obj.nodes(i);
                 edges = node.getOutEdges();
                 node.Gamma = obj.bestGm(i);
+                node.GammaCtx = obj.bestGmCtx(i);
                 for j = 1:numel(edges)
                     edge = edges(j);
                     targetId = edge.TargetNode.ID;
@@ -442,6 +434,7 @@ classdef Trainer < handle
                     edge.Beta = edge.Beta * (1 + (rand() * 2 - 1) * pct);
                 end
                 node.Gamma = node.Gamma * (1 + (rand() * 2 - 1) * pct);
+                node.GammaCtx = node.GammaCtx * (1 + (rand() * 2 - 1) * pct);
             end
         end
 
@@ -610,6 +603,8 @@ classdef Trainer < handle
                 obj.vBt = cell(numNodes, 1);
                 obj.mGm = cell(numNodes, 1);
                 obj.vGm = cell(numNodes, 1);
+                obj.mGmCtx = cell(numNodes, 1);
+                obj.vGmCtx = cell(numNodes, 1);
                 numEdgesPerNode = cellfun(@numel, obj.outgoingEdgesCache);
                 for i = 1:numNodes
                     obj.mAl{i} = zeros(1, numEdgesPerNode(i));
@@ -618,6 +613,8 @@ classdef Trainer < handle
                     obj.vBt{i} = zeros(1, numEdgesPerNode(i));
                     obj.mGm{i} = 0;
                     obj.vGm{i} = 0;
+                    obj.mGmCtx{i} = 0;
+                    obj.vGmCtx{i} = 0;
                 end
                 obj.t = 0;
             end
@@ -634,6 +631,7 @@ classdef Trainer < handle
                 clipUpAl = obj.calibratedClipUpAl; clipDownAl = obj.calibratedClipDownAl;
                 clipUpBt = obj.calibratedClipUpBt; clipDownBt = obj.calibratedClipDownBt;
                 clipUpGm = obj.calibratedClipUpGm; clipDownGm = obj.calibratedClipDownGm;
+                clipUpGmCtx = obj.calibratedClipUpGmCtx; clipDownGmCtx = obj.calibratedClipDownGmCtx;
             else
                 clipUpAl = obj.TrainingOptions.ClipUp_Alpha;   if isempty(clipUpAl), clipUpAl = obj.TrainingOptions.ClipUp; end
                 clipDownAl = obj.TrainingOptions.ClipDown_Alpha; if isempty(clipDownAl), clipDownAl = obj.TrainingOptions.ClipDown; end
@@ -641,12 +639,14 @@ classdef Trainer < handle
                 clipDownBt = obj.TrainingOptions.ClipDown_Beta;  if isempty(clipDownBt), clipDownBt = obj.TrainingOptions.ClipDown; end
                 clipUpGm = obj.TrainingOptions.ClipUp_Gamma;    if isempty(clipUpGm), clipUpGm = obj.TrainingOptions.ClipUp; end
                 clipDownGm = obj.TrainingOptions.ClipDown_Gamma; if isempty(clipDownGm), clipDownGm = obj.TrainingOptions.ClipDown; end
+                clipUpGmCtx = clipUpGm; clipDownGmCtx = clipDownGm;  % GammaCtx использует те же границы, что и Gamma
             end
 
             % Инициализация градиентов по всем батчам
             batchAlGrad = cell(numNodes, numBatches);
             batchBtGrad = cell(numNodes, numBatches);
             batchGmGrad = cell(numNodes, numBatches);
+            batchGmCtxGrad = cell(numNodes, numBatches);
 
             % Инициализация дельта-массивов для всего батча
             delta_in_cache = cell(numNodes, numBatches);
@@ -714,6 +714,7 @@ classdef Trainer < handle
                     batchAlGrad{i,batchIdx} = zeros(1, numEdges);
                     batchBtGrad{i,batchIdx} = zeros(1, numEdges);
                     batchGmGrad{i,batchIdx} = 0;
+                    batchGmCtxGrad{i,batchIdx} = 0;
                 end
                 
                 % --- Обработка примеров в батче ---
@@ -913,6 +914,9 @@ classdef Trainer < handle
                         nodeFunc.TuneParameters(nodeInputData, dJ_dC);
                     end
 
+                    % BPTT: обратное распространение через этапы (K > 1)
+                    dGammaCtx = obj.graph.BackpropContext(J_total(:));
+
                     % Вычисляем все производные в топологическом порядке
                     [alpha_derivatives, beta_derivatives, gamma_derivatives] = obj.graph.computeAllDerivativesInOrder(xMatrix);
 
@@ -984,10 +988,21 @@ classdef Trainer < handle
                         end
                     end
 
+                    % Аккумулируем BPTT-градиент GammaCtx (контекстный путь)
+                    for i = 1:numNodes
+                        if dGammaCtx(i) ~= 0
+                            h_i = obj.TrainingOptions.getNodeMultiplier(i);
+                            batchGmCtxGrad{i,batchIdx} = batchGmCtxGrad{i,batchIdx} - h_i * dGammaCtx(i);
+                        end
+                    end
+
                     % Добавляем L2 регуляризацию (λ1 в формуле 3.7)
                     for i = 1:numNodes
                         % Регуляризация по gamma
                         batchGmGrad{i,batchIdx} = batchGmGrad{i,batchIdx} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).Gamma;
+                        if obj.graph.NumStages > 1
+                            batchGmCtxGrad{i,batchIdx} = batchGmCtxGrad{i,batchIdx} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).GammaCtx;
+                        end
                         edges = obj.outgoingEdgesCache{i};
                         for j = 1:numel(edges)
                             edge = edges(j);
@@ -1009,33 +1024,40 @@ classdef Trainer < handle
                     if ~isempty(batchGmGrad{i,batchIdx})
                         batchGmGrad{i,batchIdx} = batchGmGrad{i,batchIdx} * invNumInBatch;
                     end
+                    if ~isempty(batchGmCtxGrad{i,batchIdx})
+                        batchGmCtxGrad{i,batchIdx} = batchGmCtxGrad{i,batchIdx} * invNumInBatch;
+                    end
                 end
 
                 % --- Авто-калибровка клиппинга по первому батчу ---
                 if obj.TrainingOptions.AutoCalibrateClip && ~obj.clipAutoCalibrated
-                    allAl = []; allBt = []; allGm = [];
+                    allAl = []; allBt = []; allGm = []; allGmCtx = [];
                     for i = 1:numNodes
                         if ~isempty(batchAlGrad{i,batchIdx}), allAl = [allAl, abs(batchAlGrad{i,batchIdx}(:))']; end
                         if ~isempty(batchBtGrad{i,batchIdx}), allBt = [allBt, abs(batchBtGrad{i,batchIdx}(:))']; end
                         if ~isempty(batchGmGrad{i,batchIdx}), allGm = [allGm, abs(batchGmGrad{i,batchIdx}(:))']; end
+                        if ~isempty(batchGmCtxGrad{i,batchIdx}), allGmCtx = [allGmCtx, abs(batchGmCtxGrad{i,batchIdx}(:))']; end
                     end
                     pct = obj.TrainingOptions.ClipPercentile;
                     cal = @(g) max(prctile(g, pct), eps);
                     if isempty(allAl), obj.calibratedClipUpAl = 1; else, obj.calibratedClipUpAl = cal(allAl); end
                     if isempty(allBt), obj.calibratedClipUpBt = 1; else, obj.calibratedClipUpBt = cal(allBt); end
                     if isempty(allGm), obj.calibratedClipUpGm = 1; else, obj.calibratedClipUpGm = cal(allGm); end
+                    if isempty(allGmCtx), obj.calibratedClipUpGmCtx = 1; else, obj.calibratedClipUpGmCtx = cal(allGmCtx); end
                     obj.calibratedClipDownAl = -obj.calibratedClipUpAl;
                     obj.calibratedClipDownBt = -obj.calibratedClipUpBt;
                     obj.calibratedClipDownGm = -obj.calibratedClipUpGm;
+                    obj.calibratedClipDownGmCtx = -obj.calibratedClipUpGmCtx;
                     obj.clipAutoCalibrated = true;
 
                     % Обновляем эффективные границы
                     clipUpAl = obj.calibratedClipUpAl; clipDownAl = obj.calibratedClipDownAl;
                     clipUpBt = obj.calibratedClipUpBt; clipDownBt = obj.calibratedClipDownBt;
                     clipUpGm = obj.calibratedClipUpGm; clipDownGm = obj.calibratedClipDownGm;
+                    clipUpGmCtx = obj.calibratedClipUpGmCtx; clipDownGmCtx = obj.calibratedClipDownGmCtx;
 
-                    fprintf('\nАвто-калибровка клиппинга (P%d): α=±%.2e, β=±%.2e, γ=±%.2e\n', ...
-                        pct, clipUpAl, clipUpBt, clipUpGm);
+                    fprintf('\nАвто-калибровка клиппинга (P%d): α=±%.2e, β=±%.2e, γ=±%.2e, γCtx=±%.2e\n', ...
+                        pct, clipUpAl, clipUpBt, clipUpGm, clipUpGmCtx);
                 end
 
                 % --- Применение клиппинга ---
@@ -1048,6 +1070,9 @@ classdef Trainer < handle
                     end
                     if ~isempty(batchGmGrad{i,batchIdx})
                         batchGmGrad{i,batchIdx} = min(max(batchGmGrad{i,batchIdx}, clipDownGm), clipUpGm);
+                    end
+                    if ~isempty(batchGmCtxGrad{i,batchIdx})
+                        batchGmCtxGrad{i,batchIdx} = min(max(batchGmCtxGrad{i,batchIdx}, clipDownGmCtx), clipUpGmCtx);
                     end
                 end
 
@@ -1066,6 +1091,12 @@ classdef Trainer < handle
                     obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i,batchIdx}.^2);
                     sqrtVGm = sqrt(obj.vGm{i} * vCorrFactor) + epsilon;
                     obj.nodes(i).Gamma = max(0, obj.nodes(i).Gamma + lr * (obj.mGm{i} * mCorrFactor) / sqrtVGm);
+
+                    % GammaCtx ADAM update (всегда, не зависит от рёбер)
+                    obj.mGmCtx{i} = obj.TrainingOptions.Beta1 * obj.mGmCtx{i} + (1-obj.TrainingOptions.Beta1) * batchGmCtxGrad{i,batchIdx};
+                    obj.vGmCtx{i} = obj.TrainingOptions.Beta2 * obj.vGmCtx{i} + (1-obj.TrainingOptions.Beta2) * (batchGmCtxGrad{i,batchIdx}.^2);
+                    sqrtVGmCtx = sqrt(obj.vGmCtx{i} * vCorrFactor) + epsilon;
+                    obj.nodes(i).GammaCtx = max(0, obj.nodes(i).GammaCtx + lr * (obj.mGmCtx{i} * mCorrFactor) / sqrtVGmCtx);
 
                     if isempty(edges), continue; end
 
@@ -1587,6 +1618,10 @@ classdef Trainer < handle
                 if numel(obj.mGm) < i || isempty(obj.mGm{i})
                     obj.mGm{i} = 0;
                     obj.vGm{i} = 0;
+                end
+                if numel(obj.mGmCtx) < i || isempty(obj.mGmCtx{i})
+                    obj.mGmCtx{i} = 0;
+                    obj.vGmCtx{i} = 0;
                 end
                 if numEdges == 0
                     continue;

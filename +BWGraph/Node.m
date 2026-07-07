@@ -13,7 +13,8 @@ classdef Node < handle
 
     properties (Access = public)
          ID (:,:) {mustBePositive}                   % Номер вершины
-         Gamma {mustBeFinite}                        % Свободный параметр вершины
+         Gamma {mustBeFinite}                        % Вес выхода CoreFunction
+         GammaCtx {mustBeFinite} = 1                % Вес контекста (multi-stage)
     end
     
     methods
@@ -43,6 +44,7 @@ classdef Node < handle
             obj.NodeFunction = nodeFunction;
             obj.FResult = initialValue;
             obj.Gamma = 1;
+            obj.GammaCtx = 1;
             obj.ActivationType = activationType;
         end
        
@@ -184,7 +186,24 @@ classdef Node < handle
 
         function at = getActivationType(obj)
             at = obj.ActivationType;
-        end  
+        end
+
+        function d = getActivationDerivative(obj, raw)
+            % Производная функции активации по raw (pre-activation value)
+            % raw = Gamma * CoreFunction(input)
+            switch obj.ActivationType
+                case "linear"
+                    d = 1;
+                case "sigmoid"
+                    L = 1/(1 + exp(-raw));
+                    d = L * (1 - L);
+                case "tanh"
+                    L = tanh(raw);
+                    d = 1 - L^2;
+                case "relu"
+                    d = double(raw > 0);
+            end
+        end
     end
    
 end

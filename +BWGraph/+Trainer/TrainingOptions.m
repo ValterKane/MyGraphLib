@@ -50,6 +50,7 @@ classdef TrainingOptions < handle
         StabilityClampFactor (1,1) double {mustBePositive} = 0.99
         StructuralCleanupThreshold (1,1) double {mustBeNonnegative} = 0.01
         LRDecayInterval  (1,1) double {mustBePositive, mustBeInteger} = 1
+        ContextStages        (1,1) double {mustBePositive, mustBeInteger} = 1
 
         % Параметры функций настройки
         HuberDelta (1,1) double {mustBePositive, mustBeFinite} = 1;
@@ -120,6 +121,7 @@ classdef TrainingOptions < handle
                 options.StructuralSearchEpochs (1,1) double {mustBePositive, mustBeInteger}
                 options.StructuralSearchMaxEdges (1,1) double {mustBeNonnegative}
                 options.StructuralSearchMinEdges (1,1) double {mustBeNonnegative}
+                options.ContextStages (1,1) double {mustBePositive, mustBeInteger} = 1
             end
             
             % Применяем переданные значения
