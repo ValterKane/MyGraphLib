@@ -8,7 +8,6 @@ import BWGraph.RandomGenerator.*;
 import BWGraph.Trainer.*;
 
 HeatBC = coreFunctions.Heating2DModel(30, 20, 20, 70, 1.5e-5, 0.3, 0.360, 30, 10);
-
 betaGen = FullRandomBetaGen(0,1); % Гиперпараметр
 
 nodeA = Node(1, 1,'White',HeatBC,'linear');
@@ -71,8 +70,8 @@ for i = 1:numSamples
     inputParams_for_v3 = [timeValues_for_v3(i); TinfValues_for_v3(i)];
 
     TavgValues(i) = HeatBC.CalcCoreFunction(inputParams_for_v1) + ...
-        0.1 * HeatBC.CalcCoreFunction(inputParams_for_v2) + ...
-        0.15 * HeatBC.CalcCoreFunction(inputParams_for_v3);
+        0.5 * HeatBC.CalcCoreFunction(inputParams_for_v2) + ...
+        0.3 * HeatBC.CalcCoreFunction(inputParams_for_v3);
     
 end
 
