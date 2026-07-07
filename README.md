@@ -171,7 +171,7 @@ $$\sum_{e \in \text{In}(v)} \alpha_e \;<\; 1 + \sum_{e \in \text{Out}(v)} \alpha
 
 Для каждой вершины v состояние F_v определяется балансом между активированным выходом ядровой функции и агрегированным сигналом соседей:
 
-$$F_v = \frac{\tilde{L}_v + G_{In}(v) - \displaystyle\sum_{e \in E_{Out}(v)} \beta_e}{D(v)}, \qquad D(v) = 1 + \sum_{e \in E_{Out}(v)} \alpha_e$$
+$$F_v = \frac{\tilde{L}_v + G_{In}(v) - \sum_{e \in E_{Out}(v)} \beta_e}{D(v)}, \qquad D(v) = 1 + \sum_{e \in E_{Out}(v)} \alpha_e$$
 
 где $\tilde{L}_v = \sigma_v(\gamma_v \cdot f_v(X[v]))$ — активированный выход ядра, $G_{In}(v) = \sum_{e(u \to v)} (\alpha_e \cdot F_u + \beta_e)$ — агрегированный сигнал от входящих соседей.
 
@@ -196,7 +196,7 @@ $$\mathbf{F} = (\mathbf{D} - \mathbf{A}_{in})^{-1} \bigl( \widetilde{\mathbf{L}}
 **Этап 1 (k = 1):** совпадает с плоским проходом. Вычисляется F⁽¹⁾.
 
 **Этапы k = 2…K:** для каждой вершины v вычисляется вектор контекста из состояний входящих соседей с предыдущего этапа:
-$$\mathbf{c}_v^{(k)} = \gamma^{Ctx}_v \cdot \bigl( F_{u_1}^{(k-1)}, \; F_{u_2}^{(k-1)}, \; \dots, \; F_{u_m}^{(k-1)} \bigr)^T \in \mathbb{R}^m$$
+$$\mathbf{c}_v^{(k)} = \gamma^{Ctx}_v \cdot \bigl( F_{u_1}^{(k-1)}, F_{u_2}^{(k-1)}, \dots, F_{u_m}^{(k-1)} \bigr)^T \in \mathbb{R}^m$$
 
 где m = |In(v)|, $\gamma^{Ctx}_v$ — обучаемый вес контекста (свойство `Node.GammaCtx`). Вход ядровой функции расширяется:
 $$\tilde{L}_v^{(k)} = \sigma_v\bigl( \gamma_v \cdot f_v( \mathcal{A}_v(X[v], \mathbf{c}_v^{(k)}) ) \bigr)$$
@@ -224,7 +224,7 @@ $$\tilde{F}_b = \frac{G_{in}(b) - \sum_{e \in Out(b)} \beta_e}{\sum_{e \in Out(b
 
 При K > 1 градиент по $\gamma^{Ctx}_v$ получает дополнительные BPTT-слагаемые, отсутствующие в плоской модели:
 
-$$\frac{\partial J}{\partial \gamma^{Ctx}_v} = \sum_{k=2}^{K} \; \frac{\partial J}{\partial F^{(K)}} \cdot \frac{\partial F^{(K)}}{\partial F_v^{(k)}} \cdot \frac{\partial F_v^{(k)}}{\partial \mathbf{c}_v^{(k)}} \cdot \frac{\partial \mathbf{c}_v^{(k)}}{\partial \gamma^{Ctx}_v}$$
+$$\frac{\partial J}{\partial \gamma^{Ctx}_v} = \sum_{k=2}^{K} \frac{\partial J}{\partial F^{(K)}} \cdot \frac{\partial F^{(K)}}{\partial F_v^{(k)}} \cdot \frac{\partial F_v^{(k)}}{\partial \mathbf{c}_v^{(k)}} \cdot \frac{\partial \mathbf{c}_v^{(k)}}{\partial \gamma^{Ctx}_v}$$
 
 Сомножители раскрываются:
 
