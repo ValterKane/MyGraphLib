@@ -6,12 +6,15 @@ classdef Node < handle
         FResult double                              % Значение в вершине
         EdgeIndex = 1;                              % Индекс вершины, для кеширования
         ActivationType (1,1) string {mustBeMember(ActivationType, {'linear', 'sigmoid', 'relu', 'tanh'})} = "linear"                             % Тип нелинейности в функции
-        
+        CachedCoreInput                             % Последний вход для CalcCoreFunction
+        CachedCoreResult                            % Последний результат CalcCoreFunction
+
     end
 
     properties (Access = public)
          ID (:,:) {mustBePositive}                   % Номер вершины
-         Gamma {mustBeFinite}                        % Свободный параметр вершины
+         Gamma {mustBeFinite}                        % Вес выхода CoreFunction
+         GammaCtx {mustBeFinite} = 1                % Вес контекста (multi-stage)
     end
     
     methods
@@ -41,6 +44,7 @@ classdef Node < handle
             obj.NodeFunction = nodeFunction;
             obj.FResult = initialValue;
             obj.Gamma = 1;
+            obj.GammaCtx = 1;
             obj.ActivationType = activationType;
         end
        
@@ -74,7 +78,7 @@ classdef Node < handle
             end
             
             if isConfigured(obj.OutEdgesMap) && obj.OutEdgesMap.isKey(targetNode)
-                remove(obj.OutEdgesMap, targetNode);
+                obj.OutEdgesMap = remove(obj.OutEdgesMap, targetNode);
                 success = true;
             else
                 success = false;
@@ -125,12 +129,8 @@ classdef Node < handle
         end
 
         function res = calcNodeFunc(obj, inputData)
-            if isempty(obj.NodeFunction)
-                raw = 0;
-            else
-                raw = obj.Gamma * obj.NodeFunction.CalcCoreFunction(inputData);
-            end
-            
+            raw = obj.Gamma * obj.calcRawCoreFunction(inputData);
+
             switch obj.ActivationType
                 case 'linear'
                     res = raw;
@@ -143,17 +143,25 @@ classdef Node < handle
             end
         end
 
-        function res = calcRawCoreFunction(obj,inputData)
-             if isempty(obj.NodeFunction)
-                res = 0;
+        function res = calcRawCoreFunction(obj, inputData)
+            % Кеширование CalcCoreFunction: входные данные не меняются
+            % между эпохами — первый вызов вычисляет, остальные берут из кеша
+            if isequal(inputData, obj.CachedCoreInput)
+                res = obj.CachedCoreResult;
             else
-                res = obj.NodeFunction.CalcCoreFunction(inputData);
+                if isempty(obj.NodeFunction)
+                    res = 0;
+                else
+                    res = obj.NodeFunction.CalcCoreFunction(inputData);
+                end
+                obj.CachedCoreInput = inputData;
+                obj.CachedCoreResult = res;
             end
         end
 
         function dL_dgamma = computeLGammaDerivative(obj, inputData)
-            raw = obj.Gamma * obj.NodeFunction.CalcCoreFunction(inputData);
             L = obj.calcNodeFunc(inputData);
+            raw = obj.Gamma * obj.calcRawCoreFunction(inputData);
             rawCore = obj.calcRawCoreFunction(inputData);
 
             switch obj.ActivationType
@@ -174,7 +182,28 @@ classdef Node < handle
 
         function func = getNodeFunction(obj)
             func = obj.NodeFunction;
-        end  
+        end
+
+        function at = getActivationType(obj)
+            at = obj.ActivationType;
+        end
+
+        function d = getActivationDerivative(obj, raw)
+            % Производная функции активации по raw (pre-activation value)
+            % raw = Gamma * CoreFunction(input)
+            switch obj.ActivationType
+                case "linear"
+                    d = 1;
+                case "sigmoid"
+                    L = 1/(1 + exp(-raw));
+                    d = L * (1 - L);
+                case "tanh"
+                    L = tanh(raw);
+                    d = 1 - L^2;
+                case "relu"
+                    d = double(raw > 0);
+            end
+        end
     end
    
 end

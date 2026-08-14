@@ -1,18 +1,28 @@
 classdef GraphShell < handle
 
     properties( Access = private)
-        AlphaGenerator         % Объект для генерации альфа
         BetaGenerator          % Объект для генерации бета
     end
 
     properties
         ListOfNodes BWGraph.Node  % Вектор всех Node
+        NumStages (1,1) double {mustBePositive, mustBeInteger} = 1  % K этапов Forward
     end
 
     properties (Access = private)
         fi_result
         numOfWhiteNodes
         numOfBlackNodes
+        % Кеш прямого прохода: M_inv и ConstVec не меняются между
+        % примерами в пределах одной эпохи (зависят только от α, β)
+        cachedM_inv              % (D - A_in)⁻¹
+        cachedConstVec           % B_in - B_out
+        cachedEdgeHash   = ''    % хеш параметров рёбер для инвалидации
+        % Кеш BPTT: промежуточные значения для обратного прохода по этапам
+        bptt_F_stages             % cell{K}: F_vector каждого этапа
+        bptt_ctx_stages           % cell{K}: ctx_i для каждого узла (0 если нет контекста)
+        bptt_raw_stages           % cell{K}: raw_i (до активации) для каждого узла
+        bptt_baseInputs           % cell{numNodes}: базовые входы (без контекста)
     end
 
     methods (Static)
@@ -35,23 +45,10 @@ classdef GraphShell < handle
             modelData = loadedData.modelData;
 
             % 3. Подготовка данных для создания графа
-            % 3.1. Восстановление генераторов
-            alphaGen = [];
+            % 3.1. Восстановление BetaGenerator
             betaGen = [];
 
             if isfield(modelData, 'Generators')
-                % Восстановление AlphaGenerator
-                if isfield(modelData.Generators, 'Alpha')
-                    try
-                        alphaData = modelData.Generators.Alpha;
-                        alphaGen = feval([alphaData.ClassName '.createFromData'], alphaData);
-                    catch e
-                        warning('GraphShell:LoadAlphaGen', ...
-                            'Failed to load AlphaGenerator: %s', e.message);
-                    end
-                end
-
-                % Восстановление BetaGenerator
                 if isfield(modelData.Generators, 'Beta')
                     try
                         betaData = modelData.Generators.Beta;
@@ -108,8 +105,11 @@ classdef GraphShell < handle
             % Преобразуем массив узлов в cell-массив для varargin
             nodeCellArray = num2cell(nodes);
 
+            % Собираем NodeWeight из загруженных Gamma
+            loadedGammas = arrayfun(@(n) n.Gamma, nodes);
+
             % Создаем объект GraphShell
-            loadedGraph = BWGraph.GraphShell(alphaGen, betaGen, nodeCellArray{:});
+            loadedGraph = BWGraph.GraphShell(betaGen, loadedGammas, nodeCellArray{:});
 
             % 5. Восстановление NodeFunction для всех узлов
             for i = 1:numel(loadedGraph.ListOfNodes)
@@ -126,7 +126,7 @@ classdef GraphShell < handle
             loadedGraph.numOfBlackNodes = modelData.numOfBlackNodes;
 
             % 7. Проверка целостности
-            if isempty(loadedGraph.AlphaGenerator) || isempty(loadedGraph.BetaGenerator)
+            if isempty(loadedGraph.BetaGenerator)
                 warning('GraphShell:MissingGenerators', ...
                     'Some generators were not loaded properly');
             end
@@ -137,17 +137,15 @@ classdef GraphShell < handle
     end
 
     methods (Access = public)
-        function obj = GraphShell(AlphaGenerator, BetaGenerator, NodeWeight, varargin)
+        function obj = GraphShell(BetaGenerator, NodeWeight, varargin)
 
-            if ~isa(AlphaGenerator, 'BWGraph.RandomGenerator.IRandomGen') & ...
-                    ~isa(BetaGenerator, 'BWGraph.RandomGenerator.IRandomGen')
-                error(['Генераторы для alpha и beta параметров должны' ...
+            if ~isa(BetaGenerator, 'BWGraph.RandomGenerator.IRandomGen')
+                error(['Генератор для beta параметров должен ' ...
                     'реализовывать интерфейс BWGraph.RandomGenerator.IRandomGen'])
             end
 
             obj.ListOfNodes = BWGraph.Node.empty(0, 1);
             obj.fi_result = [];
-            obj.AlphaGenerator = AlphaGenerator;
             obj.BetaGenerator = BetaGenerator;
 
 
@@ -173,9 +171,9 @@ classdef GraphShell < handle
             % Добавляем узлы
             obj.ListOfNodes = [obj.ListOfNodes; varargin{:}];
 
-            % Генерируем рандомные значения на рёбрах
-            AlphaGenerator.Generate(obj);
+            % Генерируем beta, alpha — через GenerateTopologyAwareAlpha (вызывается извне)
             BetaGenerator.Generate(obj);
+            % α инициализируются нулём — пользователь или Trainer должны вызвать GenerateTopologyAwareAlpha
 
             % Обновляем счётчики узлов
             obj.numOfBlackNodes = numel(obj.GetBlackNodesIndices);
@@ -186,45 +184,250 @@ classdef GraphShell < handle
             [obj.ListOfNodes.Gamma] = gammas{:};
         end
 
+        function GenerateTopologyAwareAlpha(obj, SafetyFactor)
+            % Публичная генерация α с учётом топологии.
+            % Гарантирует Σα_in(v) ≤ SafetyFactor·(1+Σα_out(v)).
+            % Вызывается из Trainer или вручную при использовании GraphShell без обучения.
+            arguments
+                obj          BWGraph.GraphShell
+                SafetyFactor (1,1) double = 0.8
+            end
 
-        % Прямой матричный подход
+            n = numel(obj.ListOfNodes);
+            if n == 0, return; end
+
+            incomingEdges = cell(n, 1);
+            for i = 1:n
+                incomingEdges{i} = obj.getIncomingEdges(obj.ListOfNodes(i));
+            end
+
+            for i = 1:n
+                edges = obj.ListOfNodes(i).getOutEdges();
+                for j = 1:numel(edges)
+                    edges(j).Alfa = 0;
+                end
+            end
+
+            for iter = 1:10
+                changed = false;
+                for v = 1:n
+                    inEdges = incomingEdges{v};
+                    nIn = numel(inEdges);
+                    if nIn == 0, continue; end
+
+                    outEdges = obj.ListOfNodes(v).getOutEdges();
+                    D_v = 1 + sum([outEdges.Alfa]);
+                    budget = SafetyFactor * D_v;
+
+                    for j = 1:nIn
+                        newAlpha = budget / nIn;
+                        if abs(inEdges(j).Alfa - newAlpha) > 1e-8
+                            inEdges(j).Alfa = newAlpha;
+                            changed = true;
+                        end
+                    end
+                end
+                if ~changed, break; end
+            end
+        end
+
+        % Прямой матричный подход с K этапами.
+        % K=1 — классический плоский режим (без BPTT-оверхеда)
         function Forward(obj, Data)
             arguments
                 obj     BWGraph.GraphShell
                 Data    BWGraph.CustomMatrix.BWMatrix
             end
 
-            num_nodes = numel(obj.ListOfNodes);
+            numNodes = numel(obj.ListOfNodes);
 
-            if Data.rowCount() ~= num_nodes
+            if Data.rowCount() ~= numNodes
                 error('Размерность данных не соответствует числу вершин');
             end
 
-            % 1. Строим матрицы
-            [D, A_in, B_in, B_out, L] = obj.buildSystemMatrices(Data);
-
-            % 2. Система: (D - A_in)·Φ = L + B_in - B_out
-            M = D - A_in;
-            R = L + B_in - B_out;
-
-            % % 3. Проверка условия (2.10)
-            % D_inv = diag(1./diag(D));
-            % if max(sum(abs(D_inv * A_in), 2)) >= 1
-            %     warning('Модель может быть неустойчивой');
-            % end
-
-            % 4. Решение
-            try
-                F_vector = M \ R;
-            catch
-                F_vector = pinv(M) * R;
+            % Проверяем кеш: M_inv и ConstVec не меняются между этапами
+            edgeHash = obj.computeEdgeHash();
+            if isempty(obj.cachedEdgeHash) || ~strcmp(edgeHash, obj.cachedEdgeHash)
+                [D, A_in, B_in, B_out, ~] = obj.buildSystemMatrices(Data);
+                M = D - A_in;
+                try
+                    obj.cachedM_inv = M \ eye(numNodes);
+                catch
+                    obj.cachedM_inv = pinv(M);
+                end
+                obj.cachedConstVec = B_in - B_out;
+                obj.cachedEdgeHash = edgeHash;
             end
 
-            % 5. Сохранение
-            for i = 1:num_nodes
+            % --- Fast path: K=1 (классический режим, ноль оверхеда) ---
+            if obj.NumStages <= 1
+                L = zeros(numNodes, 1);
+                for i = 1:numNodes
+                    L(i) = obj.ListOfNodes(i).calcNodeFunc(Data.getRow(i));
+                end
+                F_vector = obj.cachedM_inv * (L + obj.cachedConstVec);
+                for i = 1:numNodes
+                    obj.ListOfNodes(i).setFResult(F_vector(i));
+                end
+                obj.fi_result = F_vector;
+                return;
+            end
+
+            % --- Multi-stage path: K > 1 ---
+            K = obj.NumStages;
+
+            % Определяем, поддерживает ли каждая вершина контекст
+            useContext = false(numNodes, 1);
+            for i = 1:numNodes
+                nf = obj.ListOfNodes(i).getNodeFunction();
+                if ~isempty(nf)
+                    useContext(i) = nf.SupportsContext();
+                end
+            end
+            anyContext = any(useContext);
+
+            % Предзагрузка базовых входных данных
+            baseInputs = cell(numNodes, 1);
+            for i = 1:numNodes
+                baseInputs{i} = Data.getRow(i);
+            end
+
+            % Инициализация кеша BPTT
+            if anyContext
+                obj.bptt_F_stages = cell(K, 1);
+                obj.bptt_ctx_stages = cell(K, 1);
+                obj.bptt_raw_stages = cell(K, 1);
+                obj.bptt_baseInputs = baseInputs;
+            end
+
+            % Многоэтапный проход
+            F_prev = zeros(numNodes, 1);
+            for stage = 1:K
+                L = zeros(numNodes, 1);
+                raw_store = zeros(numNodes, 1);
+                ctx_store = cell(numNodes, 1);
+
+                for i = 1:numNodes
+                    augInput = baseInputs{i};
+                    node = obj.ListOfNodes(i);
+
+                    if stage > 1 && anyContext && useContext(i) && node.GammaCtx > 0
+                        inEdges = obj.getIncomingEdges(node);
+                        nIn = numel(inEdges);
+                        if nIn > 0
+                            ctx_vec = zeros(nIn, 1);
+                            for e = 1:nIn
+                                src = inEdges(e).SourceNode;
+                                srcIdx = find(obj.ListOfNodes == src, 1);
+                                if ~isempty(srcIdx)
+                                    ctx_vec(e) = node.GammaCtx * F_prev(srcIdx);
+                                end
+                            end
+                            ctx_store{i} = ctx_vec;
+                            augInput = node.getNodeFunction().AugmentInput(baseInputs{i}, ctx_vec);
+                        end
+                    end
+
+                    raw_store(i) = node.Gamma * node.calcRawCoreFunction(augInput);
+                    L(i) = node.calcNodeFunc(augInput);
+                end
+
+                F_vector = obj.cachedM_inv * (L + obj.cachedConstVec);
+
+                if anyContext
+                    obj.bptt_F_stages{stage} = F_vector;
+                    obj.bptt_ctx_stages{stage} = ctx_store;
+                    obj.bptt_raw_stages{stage} = raw_store;
+                end
+
+                F_prev = F_vector;
+            end
+
+            % Сохранение финального F
+            for i = 1:numNodes
                 obj.ListOfNodes(i).setFResult(F_vector(i));
             end
             obj.fi_result = F_vector;
+        end
+
+        function invalidateForwardCache(obj)
+            obj.cachedEdgeHash = '';
+            obj.bptt_F_stages = {};
+            obj.bptt_ctx_stages = {};
+            obj.bptt_raw_stages = {};
+        end
+
+        function dGammaCtx = BackpropContext(obj, dF_final)
+            % BPTT: обратное распространение градиента через этапы.
+            % Вход:
+            %   dF_final — dLoss/dF финального этапа (numNodes × 1)
+            % Выход:
+            %   dGammaCtx — dLoss/dGammaCtx от контекстного пути (numNodes × 1)
+
+            numNodes = numel(obj.ListOfNodes);
+            K = obj.NumStages;
+            dGammaCtx = zeros(numNodes, 1);
+
+            if K <= 1 || isempty(obj.bptt_F_stages)
+                return;
+            end
+
+            dF = dF_final;
+
+            for stage = K:-1:2
+                dF_prev_add = zeros(numNodes, 1);
+
+                for i = 1:numNodes
+                    ctx_cell = obj.bptt_ctx_stages{stage};
+                    if isempty(ctx_cell) || isempty(ctx_cell{i}), continue; end
+                    ctx_vec = ctx_cell{i};
+
+                    node = obj.ListOfNodes(i);
+                    raw_i = obj.bptt_raw_stages{stage}(i);
+                    actDeriv = node.getActivationDerivative(raw_i);
+
+                    % ∂Core_i/∂ctx (вектор-строка 1×nIn)
+                    nf = node.getNodeFunction();
+                    dCore_dctx = nf.CalcContextDerivative(obj.bptt_baseInputs{i}, ctx_vec);
+
+                    % ∂L_i/∂ctx = act'(raw) × γ_i × ∂Core/∂ctx (1×nIn)
+                    dL_dctx = node.Gamma * actDeriv * dCore_dctx;
+
+                    % ∂F_i/∂ctx = M_inv(i,i) × ∂L_i/∂ctx (1×nIn)
+                    dF_dctx = obj.cachedM_inv(i, i) * dL_dctx;
+
+                    % Градиент GammaCtx и пропагация на F_prev
+                    inEdges = obj.getIncomingEdges(node);
+                    nIn = numel(inEdges);
+                    for e = 1:nIn
+                        % d(ctx_j)/dGammaCtx = F_prev(src) = ctx_j / GammaCtx
+                        dGammaCtx(i) = dGammaCtx(i) ...
+                            + dF(i) * dF_dctx(e) * (ctx_vec(e) / node.GammaCtx);
+
+                        % d(ctx_j)/dF_prev(src) = GammaCtx
+                        src = inEdges(e).SourceNode;
+                        srcIdx = find(obj.ListOfNodes == src, 1);
+                        if ~isempty(srcIdx)
+                            dF_prev_add(srcIdx) = dF_prev_add(srcIdx) ...
+                                + dF(i) * dF_dctx(e) * node.GammaCtx;
+                        end
+                    end
+                end
+
+                dF = dF + dF_prev_add;
+            end
+        end
+
+        function h = computeEdgeHash(obj)
+            % Быстрый хеш всех α, β на рёбрах — для инвалидации кеша прямого прохода
+            parts = {};
+            for i = 1:numel(obj.ListOfNodes)
+                edges = obj.ListOfNodes(i).getOutEdges();
+                for j = 1:numel(edges)
+                    parts{end+1} = sprintf('%.6g_%.6g', edges(j).Alfa, edges(j).Beta);
+                end
+            end
+            h = strjoin(parts, '|');
         end
 
         function numOfWhiteNode = GetNumOfWhiteNode(obj)
@@ -313,16 +516,16 @@ classdef GraphShell < handle
         function [D, A_in, B_in, B_out, L] = buildSystemMatrices(obj, Data)
             % Возвращает гарантированно диагональную матрицу D
 
-            num_nodes = numel(obj.ListOfNodes);
+            numNodes = numel(obj.ListOfNodes);
 
             % ВАЖНО: D должна быть матрицей n x n, а не вектором!
-            D = zeros(num_nodes, num_nodes);  % Матрица
-            A_in = zeros(num_nodes, num_nodes);
-            B_in = zeros(num_nodes, 1);
-            B_out = zeros(num_nodes, 1);
-            L = zeros(num_nodes, 1);
+            D = zeros(numNodes, numNodes);  % Матрица
+            A_in = zeros(numNodes, numNodes);
+            B_in = zeros(numNodes, 1);
+            B_out = zeros(numNodes, 1);
+            L = zeros(numNodes, 1);
 
-            for i = 1:num_nodes
+            for i = 1:numNodes
                 currentNode = obj.ListOfNodes(i);
 
                 % 1. Вычисляем L(i)
@@ -333,17 +536,13 @@ classdef GraphShell < handle
                     L(i) = currentNode.getFResult();  % Или 0
                 end
 
-                % 2. Диагональный элемент D(i,i) - и только он!
+                % 2. Диагональный элемент D(i,i) = 1 + Σα_out (формула 2.6)
                 outgoingEdges = currentNode.getOutEdges();
-                sum_alpha_plus_one = 0;
-
-                for k = 1:numel(outgoingEdges)
-                    edge = outgoingEdges(k);
-                    sum_alpha_plus_one = sum_alpha_plus_one + (edge.Alfa + 1);
+                if ~isempty(outgoingEdges)
+                    D(i, i) = 1 + sum([outgoingEdges.Alfa]);
+                else
+                    D(i, i) = 1;
                 end
-
-                % ЗАПИСЫВАЕМ ТОЛЬКО В ДИАГОНАЛЬНЫЙ ЭЛЕМЕНТ
-                D(i, i) = sum_alpha_plus_one;
 
                 if D(i, i) == 0
                     error(['Знаменатель равен нулю для вершины ', num2str(i)]);
@@ -378,61 +577,27 @@ classdef GraphShell < handle
             % Значение dL/dGamma
             dL_dGamma = v.computeLGammaDerivative(inputData);
 
-            % % Выходные ребра вершины
-            % outgoingEdges = v.getOutEdges();
+            % Выходные ребра вершины
+            outgoingEdges = v.getOutEdges();
             % 
             % denominator = 0;
             % for k = 1:numel(outgoingEdges)
             %     denominator = denominator + (outgoingEdges(k).Alfa + 1);
             % end
 
-            denominator = sum(arrayfun(@(e) e.Alfa + 1, v.getOutEdges()));
+            if ~isempty(outgoingEdges)
+                denominator = 1 + sum([outgoingEdges.Alfa]);
+            else
+                denominator = 1;
+            end
+            % 
+            % denominator = sum(arrayfun(@(e) e.Alfa + 1, outgoingEdges));
 
             if abs(denominator) < eps
                 error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
             end
 
             dF_dGamma = dL_dGamma / denominator;
-        end
-
-        function dF_dalpha = computeOutgoingAlphaDerivativeForEdge(obj, nodeIndex)
-            % Вспомогательная функция для прямого вычисления
-            % ∂F_v/∂α_e для ИСХОДЯЩЕГО ребра без проверки кэша
-
-            F_v = obj.ListOfNodes(nodeIndex).getFResult();
-
-            currentNode = obj.ListOfNodes(nodeIndex);
-            outgoingEdges = currentNode.getOutEdges();
-
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
-
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
-
-            dF_dalpha = -F_v / denominator;
-        end
-
-        function dF_dbeta = computeOutgoingBetaDerivativeForEdge(obj, nodeIndex)
-            % Вспомогательная функция для прямого вычисления
-            % ∂F_v/∂β_e для ИСХОДЯЩЕГО ребра без проверки кэша
-
-            currentNode = obj.ListOfNodes(nodeIndex);
-            outgoingEdges = currentNode.getOutEdges();
-
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
-
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
-
-            dF_dbeta = -1 / denominator;
         end
 
         function [alpha_derivatives, beta_derivatives, gama_derivatives] = computeAllDerivativesInOrder(obj, XData)
@@ -532,10 +697,7 @@ classdef GraphShell < handle
             currentNode = obj.ListOfNodes(nodeIndex);
             outgoingEdges = currentNode.getOutEdges();
 
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
+            denominator = 1 + sum([outgoingEdges.Alfa]);
 
             if abs(denominator) < eps
                 error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
@@ -551,10 +713,7 @@ classdef GraphShell < handle
             currentNode = obj.ListOfNodes(nodeIndex);
             outgoingEdges = currentNode.getOutEdges();
 
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
+            denominator = 1 + sum([outgoingEdges.Alfa]);
 
             if abs(denominator) < eps
                 error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
@@ -581,17 +740,18 @@ classdef GraphShell < handle
             currentNode = obj.ListOfNodes(nodeIndex);
             outgoingEdges = currentNode.getOutEdges();
 
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
-            end
+            if ~isempty(outgoingEdges)
+                denominator = 1 + sum([outgoingEdges.Alfa]);
 
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
+                if abs(denominator) < eps
+                    error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
+                end
 
-            % Формула (3.13)
-            dF_dalpha = (F_u + alpha_e * dF_source_dalpha) / denominator;
+                % Формула (3.13)
+                dF_dalpha = (F_u + alpha_e * dF_source_dalpha) / denominator;
+            else
+                dF_dalpha = F_u + alpha_e * dF_source_dalpha;
+            end 
         end
 
         function dF_dbeta = computeIncomingBetaDerivativeDirect(obj, nodeIndex, edge, dF_source_dbeta)
@@ -603,23 +763,37 @@ classdef GraphShell < handle
             % Знаменатель для вершины v
             currentNode = obj.ListOfNodes(nodeIndex);
             outgoingEdges = currentNode.getOutEdges();
+            
+            if ~isempty(outgoingEdges)
 
-            denominator = 0;
-            for k = 1:numel(outgoingEdges)
-                denominator = denominator + (outgoingEdges(k).Alfa + 1);
+                denominator = 1 + sum([outgoingEdges.Alfa]);
+
+                if abs(denominator) < eps
+                    error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
+                end
+
+                dF_dbeta = (1 + alpha_e * dF_source_dbeta) / denominator;
+
+            else
+                dF_dbeta = 1 + alpha_e * dF_source_dbeta;
             end
-
-            if abs(denominator) < eps
-                error(['Знаменатель близок к нулю для вершины ', num2str(nodeIndex)]);
-            end
-
-            % Формула (3.14)
-            dF_dbeta = (2 + alpha_e * dF_source_dbeta) / denominator;
+            
         end
 
-        function DrawGraph_New(obj, titleStr)
+        function DrawGraph_New(obj, titleStr, ax, hideEdgeLabels)
             % Метод для визуализации структуры графа с нелинейными параметрами
-            % Отображает все 4 параметра: α, β, γ, δ
+            % Если передан ax — рисует на заданных осях, иначе в новой фигуре
+
+            % Определяем режим: полноэкранный или встроенный (subplot)
+            embeddedMode = (nargin >= 3 && ~isempty(ax));
+            if nargin < 4, hideEdgeLabels = false; end
+            if embeddedMode
+                axes(ax);
+                cla(ax);
+            else
+                figure;
+                set(gcf, 'Position', [100, 100, 1200, 800]);
+            end
 
             % Создаем пустой ориентированный граф
             G = digraph();
@@ -627,6 +801,7 @@ classdef GraphShell < handle
             % Получаем все ID узлов
             nodeIDs = [obj.ListOfNodes.ID];
             nodeGammas = [obj.ListOfNodes.Gamma];
+            nodeGammaCtxs = [obj.ListOfNodes.GammaCtx];
 
             % Добавляем узлы в граф (используем строковые ID)
             for i = 1:numel(nodeIDs)
@@ -634,7 +809,10 @@ classdef GraphShell < handle
             end
 
             % Добавляем рёбра с метками
-            edgeLabels = {};
+            edgeLabelsShort = {};
+            edgeLabelsFull = {};
+            edgeSrcIDs = [];
+            edgeTgtIDs = [];
             hasEdges = false;
 
             for i = 1:numel(obj.ListOfNodes)
@@ -647,7 +825,10 @@ classdef GraphShell < handle
 
                     if any(nodeIDs == targetNode.ID)
                         G = addedge(G, num2str(sourceNode.ID), num2str(targetNode.ID));
-                        edgeLabels{end+1} = sprintf('α=%.2f\n β=%.2f', edge.Alfa, edge.Beta);
+                        edgeLabelsShort{end+1} = sprintf('α=%.3f β=%.3f', edge.Alfa, edge.Beta);
+                        edgeLabelsFull{end+1} = sprintf('α=%.3f β=%.3f', edge.Alfa, edge.Beta);
+                        edgeSrcIDs(end+1) = sourceNode.ID;
+                        edgeTgtIDs(end+1) = targetNode.ID;
                         hasEdges = true;
                     else
                         warning('Target node ID %d not found in graph', targetNode.ID);
@@ -655,60 +836,49 @@ classdef GraphShell < handle
                 end
             end
 
-            % Создаем метки узлов
-            nodeLabels = arrayfun(@(x,g) sprintf(' v_%d γ=%.2f', x, g), nodeIDs,nodeGammas, 'UniformOutput', false);
+            % Метки узлов — только ID (чисто, без параметров)
+            nodeLabels = arrayfun(@(x) sprintf(' v_{%d}', x), nodeIDs, 'UniformOutput', false);
 
-            % Настраиваем визуализацию
-            figure;
-
-            % Увеличиваем размер фигуры для лучшего отображения
-            set(gcf, 'Position', [100, 100, 1200, 800]);
+            if embeddedMode
+                nfs = 11; efs = 9; ms = 12; as = 10; lw = 1.5;
+            else
+                nfs = 18; efs = 11; ms = 20; as = 14; lw = 2.5;
+            end
 
             if ~hasEdges
                 h = plot(G, ...
                     'Layout', 'force', ...
                     'NodeLabel', nodeLabels, ...
-                    'MarkerSize', 16, ...
-                    'NodeFontSize', 14, ...
-                    'LineWidth', 2);
+                    'MarkerSize', ms, ...
+                    'NodeFontSize', nfs, ...
+                    'LineWidth', lw);
             else
-                % Используем улучшенный layout для лучшего отображения меток
                 h = plot(G, ...
                     'Layout', 'layered', ...
                     'Direction', 'down', ...
                     'NodeLabel', nodeLabels, ...
-                    'ArrowSize', 15, ...
-                    'LineWidth', 2, ...
-                    'EdgeFontSize', 11, ...
-                    'NodeFontSize', 16, ...
-                    'ArrowPosition', 0.9); % Стрелки ближе к цели
+                    'ArrowSize', as, ...
+                    'LineWidth', lw, ...
+                    'EdgeFontSize', efs, ...
+                    'NodeFontSize', nfs, ...
+                    'ArrowPosition', 0.9);
 
-                % Устанавливаем цвет для стрелок
-                h.EdgeColor = [0 0 0]; % Черный цвет для всех ребер
-
-                % Увеличиваем прозрачность для лучшей видимости меток
+                h.EdgeColor = [0 0 0];
                 h.EdgeAlpha = 0.8;
             end
 
-            % Создаем массивы цветов для узлов
             nodeColors = zeros(numel(obj.ListOfNodes), 3);
-            blackNodes = 0;
-            whiteNodes = 0;
-
             for i = 1:numel(obj.ListOfNodes)
                 if obj.ListOfNodes(i).getNodeType() == BWGraph.NodeColor.Black
-                    nodeColors(i,:) = [0 0 0]; % Черный цвет
-                    blackNodes = blackNodes + 1;
+                    nodeColors(i,:) = [0 0 0];
                 else
-                    nodeColors(i,:) = [0.9 0.9 0.9]; % Белый цвет (чистый белый)
-                    whiteNodes = whiteNodes + 1;
+                    nodeColors(i,:) = [0.9 0.9 0.9];
                 end
             end
 
-            % Устанавливаем свойства узлов
-            h.NodeColor = [0 0 0]; % Черная окантовка для всех узлов
-            h.MarkerSize = 14; % Размер узлов
-            h.LineWidth = 1.5; % Толщина окантовки
+            h.NodeColor = [0 0 0];
+            h.MarkerSize = ms;
+            h.LineWidth = lw;
 
             % Для MATLAB R2019b и новее можно использовать MarkerFaceColor
             if isprop(h, 'MarkerFaceColor')
@@ -721,56 +891,117 @@ classdef GraphShell < handle
             end
 
             % Добавляем метки рёбер (если есть ребра)
-            if hasEdges
-                h.EdgeLabel = edgeLabels;
-                set(h, 'EdgeLabelColor', [0 0 0]); % Черный цвет текста меток
+            if hasEdges && ~hideEdgeLabels
+                h.EdgeLabel = edgeLabelsShort;
+                set(h, 'EdgeLabelColor', [0.2 0.2 0.6]);
 
-                % Улучшаем отображение меток рёбер
                 if isprop(h, 'EdgeLabelRotation')
-                    h.EdgeLabelRotation = 0; % Горизонтальные метки
+                    h.EdgeLabelRotation = 0;
                 end
-
-                % Добавляем фон для меток рёбер для лучшей читаемости
                 if isprop(h, 'EdgeLabelBackgroundColor')
-                    h.EdgeLabelBackgroundColor = [1 1 0.9]; % Светло-желтый фон
-                    h.EdgeLabelBackgroundAlpha = 0.7; % Полупрозрачный
+                    h.EdgeLabelBackgroundColor = [1 1 0.95];
+                    h.EdgeLabelBackgroundAlpha = 0.8;
                 end
             end
 
-            % Добавляем заголовок
-            if nargin > 1 && ~isempty(titleStr)
-                title(titleStr, 'FontSize', 16, 'FontWeight', 'bold');
+            % --- Таблица параметров вершин (γ, γ_C) ---
+            nodeTableRows = cell(numel(obj.ListOfNodes) + 1, 1);
+            if obj.NumStages > 1
+                nodeTableRows{1} = sprintf('%-6s %-6s %-6s %s', 'Узел', 'Тип', '\gamma', '\gamma_C');
+                sep = '---------------------------';
+                nodeTableRows{2} = sep;
+                for i = 1:numel(obj.ListOfNodes)
+                    nt = obj.ListOfNodes(i).getNodeType();
+                    typeStr = 'W'; if nt == BWGraph.NodeColor.Black, typeStr = 'B'; end
+                    nodeTableRows{i+2} = sprintf('v_{%d}    %s     %5.2f  %5.2f', ...
+                        nodeIDs(i), typeStr, nodeGammas(i), nodeGammaCtxs(i));
+                end
             else
-                title('Черно-белый граф с нелинейными параметрами', ...
-                    'FontSize', 16, 'FontWeight', 'bold');
+                nodeTableRows{1} = sprintf('%-6s %-6s %-6s', 'Узел', 'Тип', '\gamma');
+                sep = '---------------------';
+                nodeTableRows{2} = sep;
+                for i = 1:numel(obj.ListOfNodes)
+                    nt = obj.ListOfNodes(i).getNodeType();
+                    typeStr = 'Б'; if nt == BWGraph.NodeColor.Black, typeStr = 'Ч'; end
+                    nodeTableRows{i+2} = sprintf('v_{%d}    %s     %5.2f', ...
+                        nodeIDs(i), typeStr, nodeGammas(i));
+                end
+            end
+            nodeTableStr = strjoin(nodeTableRows, '\n');
+
+            % --- Таблица параметров рёбер (α, β) ---
+            if hasEdges
+                edgeTableRows = cell(numel(edgeLabelsFull) + 1, 1);
+                edgeTableRows{1} = sprintf('%-8s %-6s %-6s', 'Ребро', '\alpha', '\beta');
+                edgeTableRows{2} = '--------------------';
+                for e = 1:numel(edgeLabelsFull)
+                    parts = strsplit(edgeLabelsFull{e}, ' ');
+                    aVal = str2double(extractAfter(parts{1}, 'α='));
+                    bVal = str2double(extractAfter(parts{2}, 'β='));
+                    edgeTableRows{e+2} = sprintf('%d→%d     %5.2f  %5.2f', ...
+                        edgeSrcIDs(e), edgeTgtIDs(e), aVal, bVal);
+                end
+                edgeTableStr = strjoin(edgeTableRows, '\n');
             end
 
-            % Добавляем информационную панель
-            infoText = sprintf('Узлов: %d (Черных: %d, Белых: %d)', ...
-                numel(obj.ListOfNodes), blackNodes, whiteNodes);
-            annotation('textbox', [0.02, 0.02, 0.3, 0.05], ...
-                'String', infoText, ...
-                'FontSize', 12, ...
-                'BackgroundColor', [0.95, 0.95, 0.95], ...
-                'EdgeColor', [0.5, 0.5, 0.5]);
+            % --- Таблицы параметров (только в standalone-режиме) ---
+            if ~embeddedMode
+                xlims = xlim; ylims = ylim;
+                tfs = 11;
 
-            % Добавляем легенду с параметрами
-            if hasEdges
-                % Создаем панель с пояснениями параметров
-                paramText = {...
-                    'Параметры рёбер:', ...
-                    'α - линейный коэффициент', ...
-                    'β - константное смещение'};
+                text(xlims(1) + 0.02*(xlims(2)-xlims(1)), ...
+                     ylims(2) - 0.02*(ylims(2)-ylims(1)), ...
+                     strrep(nodeTableStr, '_', '\_'), ...
+                     'FontName', 'Courier New', 'FontSize', tfs, ...
+                     'VerticalAlignment', 'top', 'HorizontalAlignment', 'left', ...
+                     'BackgroundColor', [1 1 1], 'EdgeColor', [0.5 0.5 0.5], ...
+                     'Margin', 3);
 
-                annotation('textbox', [0.7, 0.75, 0.2, 0.1], ...
-                    'String', paramText, ...
-                    'FontSize', 11, ...
+                if hasEdges
+                    text(xlims(1) + 0.02*(xlims(2)-xlims(1)), ...
+                         ylims(1) + 0.02*(ylims(2)-ylims(1)), ...
+                         strrep(edgeTableStr, '_', '\_'), ...
+                         'FontName', 'Courier New', 'FontSize', tfs, ...
+                         'VerticalAlignment', 'bottom', 'HorizontalAlignment', 'left', ...
+                         'BackgroundColor', [1 1 1], 'EdgeColor', [0.5 0.5 0.5], ...
+                         'Margin', 3);
+                end
+            end
+
+            % Заголовок
+            if nargin > 1 && ~isempty(titleStr)
+                title(titleStr, 'FontSize', 12, 'FontWeight', 'bold');
+            else
+                title('Структура связей графа', 'FontSize', 12, 'FontWeight', 'bold');
+            end
+
+            nBlack = sum(arrayfun(@(nd) nd.getNodeType() == BWGraph.NodeColor.Black, obj.ListOfNodes));
+            nWhite = numel(obj.ListOfNodes) - nBlack;
+
+            % В полноэкранном режиме — информационные панели
+            if ~embeddedMode
+                infoText = sprintf('Узлов: %d (Черных: %d, Белых: %d)', ...
+                    numel(obj.ListOfNodes), nBlack, nWhite);
+                annotation('textbox', [0.02, 0.02, 0.3, 0.05], ...
+                    'String', infoText, ...
+                    'FontSize', 12, ...
                     'BackgroundColor', [0.95, 0.95, 0.95], ...
                     'EdgeColor', [0.5, 0.5, 0.5]);
+
+                if hasEdges
+                    paramText = {'Параметры рёбер:', ...
+                        'α - линейный коэффициент', ...
+                        'β - константное смещение'};
+                    annotation('textbox', [0.7, 0.75, 0.2, 0.1], ...
+                        'String', paramText, ...
+                        'FontSize', 11, ...
+                        'BackgroundColor', [0.95, 0.95, 0.95], ...
+                        'EdgeColor', [0.5, 0.5, 0.5]);
+                end
             end
 
             % Добавляем легенду для узлов
-            if blackNodes > 0 || whiteNodes > 0
+            if nBlack > 0 || nWhite > 0
                 hold on;
 
                 % Создаем фиктивные точки для легенды
@@ -789,22 +1020,20 @@ classdef GraphShell < handle
                 legendHandles = [];
                 legendLabels = {};
 
-                if blackNodes > 0
+                if nBlack > 0
                     legendHandles = [legendHandles, hBlack];
-                    legendLabels = [legendLabels, 'Черные вершины (без данных)'];
+                    legendLabels = [legendLabels, 'Чёрные'];
                 end
-                if whiteNodes > 0
+                if nWhite > 0
                     legendHandles = [legendHandles, hWhite];
-                    legendLabels = [legendLabels, 'Белые вершины (с данными)'];
+                    legendLabels = [legendLabels, 'Белые'];
                 end
 
-                % Создаем легенду
+                % Компактная легенда в правом нижнем углу
                 lg = legend(legendHandles, legendLabels, ...
-                    'Location', 'northeast', ...
-                    'FontSize', 12);
-
-                % Устанавливаем фон легенды
-                set(lg, 'Color', [0.95, 0.95, 0.95]);
+                    'Location', 'best', ...
+                    'FontSize', 8, ...
+                    'Box', 'off');
 
                 hold off;
             end
@@ -818,8 +1047,6 @@ classdef GraphShell < handle
             if ~hasEdges
                 grid on;
                 axis on;
-                xlabel('X координата');
-                ylabel('Y координата');
             end
 
             % Автоматически подгоняем размеры для лучшего отображения
@@ -857,6 +1084,379 @@ classdef GraphShell < handle
             end
         end
 
+        % ===== Методы манипуляции топологией (структурный поиск) =====
+
+        function addEdgeBetween(obj, sourceIdx, targetIdx, alpha, beta)
+            % Добавляет направленное ребро от sourceIdx к targetIdx
+            % Индексы — позиции в ListOfNodes (1-based)
+            arguments
+                obj         BWGraph.GraphShell
+                sourceIdx   (1,1) double {mustBePositive, mustBeInteger}
+                targetIdx   (1,1) double {mustBePositive, mustBeInteger}
+                alpha       (1,1) double = 0
+                beta        (1,1) double = 0
+            end
+
+            if sourceIdx == targetIdx
+                error('Петли (sourceIdx == targetIdx) не допускаются');
+            end
+            if sourceIdx > numel(obj.ListOfNodes) || targetIdx > numel(obj.ListOfNodes)
+                error('Индексы вершин выходят за пределы ListOfNodes');
+            end
+            if obj.hasEdge(sourceIdx, targetIdx)
+                error('Ребро %d->%d уже существует', sourceIdx, targetIdx);
+            end
+
+            sourceNode = obj.ListOfNodes(sourceIdx);
+            targetNode = obj.ListOfNodes(targetIdx);
+            sourceNode.addEdge(targetNode);
+
+            edge = sourceNode.getEdgeToTarget(targetNode);
+            edge.Alfa = alpha;
+            edge.Beta = beta;
+        end
+
+        function removeEdgeBetween(obj, sourceIdx, targetIdx)
+            % Удаляет направленное ребро от sourceIdx к targetIdx
+            arguments
+                obj         BWGraph.GraphShell
+                sourceIdx   (1,1) double {mustBePositive, mustBeInteger}
+                targetIdx   (1,1) double {mustBePositive, mustBeInteger}
+            end
+
+            if sourceIdx > numel(obj.ListOfNodes) || targetIdx > numel(obj.ListOfNodes)
+                error('Индексы вершин выходят за пределы ListOfNodes');
+            end
+            if ~obj.hasEdge(sourceIdx, targetIdx)
+                error('Ребро %d->%d не существует', sourceIdx, targetIdx);
+            end
+
+            sourceNode = obj.ListOfNodes(sourceIdx);
+            targetNode = obj.ListOfNodes(targetIdx);
+            sourceNode.removeEdgeByTarget(targetNode);
+        end
+
+        function flag = hasEdge(obj, sourceIdx, targetIdx)
+            % Проверяет существование ребра
+            arguments
+                obj         BWGraph.GraphShell
+                sourceIdx   (1,1) double {mustBePositive, mustBeInteger}
+                targetIdx   (1,1) double {mustBePositive, mustBeInteger}
+            end
+
+            if sourceIdx > numel(obj.ListOfNodes) || targetIdx > numel(obj.ListOfNodes)
+                flag = false;
+                return;
+            end
+
+            sourceNode = obj.ListOfNodes(sourceIdx);
+            targetNode = obj.ListOfNodes(targetIdx);
+            outMap = sourceNode.getOutEdgesMap();
+            flag = isConfigured(outMap) && outMap.isKey(targetNode);
+        end
+
+        function pairs = getPossibleEdges(obj)
+            % Возвращает N×2 матрицу пар (i,j), где ребра НЕТ и i≠j
+            n = numel(obj.ListOfNodes);
+            pairs = zeros(0, 2);
+            for i = 1:n
+                for j = 1:n
+                    if i ~= j && ~obj.hasEdge(i, j)
+                        pairs(end+1, :) = [i, j];
+                    end
+                end
+            end
+        end
+
+        function pairs = getExistingEdges(obj)
+            % Возвращает N×2 матрицу пар (i,j), где ребро ЕСТЬ
+            n = numel(obj.ListOfNodes);
+            pairs = zeros(0, 2);
+            for i = 1:n
+                sourceNode = obj.ListOfNodes(i);
+                edges = sourceNode.getOutEdges();
+                for k = 1:numel(edges)
+                    targetNode = edges(k).TargetNode;
+                    j = find(obj.ListOfNodes == targetNode, 1);
+                    if ~isempty(j)
+                        pairs(end+1, :) = [i, j];
+                    end
+                end
+            end
+        end
+
+        function count = getTotalEdgeCount(obj)
+            % Возвращает общее количество рёбер в графе
+            count = 0;
+            for i = 1:numel(obj.ListOfNodes)
+                count = count + numel(obj.ListOfNodes(i).getOutEdges());
+            end
+        end
+
+        function [alpha, beta] = generateEdgeParams(obj)
+            % Генерирует пару (alpha, beta) теми же генераторами,
+            % что использовались при начальной инициализации графа
+            arguments
+                obj BWGraph.GraphShell
+            end
+
+            import BWGraph.*;
+            import coreFunctions.*;
+
+            % Создаём временный граф из двух вершин с одним ребром
+            tempSrc = Node(9999, 0, NodeColor.Black, [], "linear");
+            tempDst = Node(9998, 0, NodeColor.Black, [], "linear");
+            tempSrc.addEdge(tempDst);
+
+            % Конструируем — beta заполняется генератором, alpha — топологически
+            GraphShell(obj.BetaGenerator, ...
+                [1, 1], tempSrc, tempDst);
+
+            edges = tempSrc.getOutEdges();
+            alpha = edges(1).Alfa;
+            beta  = edges(1).Beta;
+        end
+
+        function [isStable, msg] = checkStability(obj)
+            % Проверяет условия устойчивости (3.3) из рукописи для всех вершин
+            % Возвращает:
+            %   isStable — true если все вершины удовлетворяют условию
+            %   msg     — описание первой найденной проблемы (пусто если стабилен)
+            arguments
+                obj BWGraph.GraphShell
+            end
+
+            isStable = true;
+            msg = '';
+
+            for i = 1:numel(obj.ListOfNodes)
+                node = obj.ListOfNodes(i);
+
+                % Знаменатель: 1 + Σα_out (базовая единица + сумма исходящих α)
+                outEdges = node.getOutEdges();
+                sumAlphaOut = 0;
+                for k = 1:numel(outEdges)
+                    sumAlphaOut = sumAlphaOut + outEdges(k).Alfa;
+                end
+                denominator = sumAlphaOut + 1; % 1 + Σα_out
+
+                % Условие устойчивости (3.3): Σα_in < 1 + Σα_out
+                % Базовая +1 гарантирует: для изолированной вершины 0 < 1 (стабильна),
+                % для вершины без исходящих рёбер с одним входящим α=3: 3 < 1 (нестабильна)
+
+                % Сумма входящих α
+                sumAlphaIn = 0;
+                for j = 1:numel(obj.ListOfNodes)
+                    if j ~= i && obj.hasEdge(j, i)
+                        [a, ~] = obj.getEdgeParams(j, i);
+                        sumAlphaIn = sumAlphaIn + a;
+                    end
+                end
+
+                if sumAlphaIn >= denominator
+                    isStable = false;
+                    msg = sprintf(['Вершина %d (позиция %d): нарушено условие устойчивости ' ...
+                        '(Σα_in=%.4f ≥ 1+Σα_out=%.4f)'], ...
+                        node.ID, i, sumAlphaIn, denominator);
+                    return;
+                end
+            end
+        end
+
+        function [alpha, beta] = getEdgeParams(obj, sourceIdx, targetIdx)
+            % Возвращает параметры (alpha, beta) конкретного ребра
+            arguments
+                obj         BWGraph.GraphShell
+                sourceIdx   (1,1) double {mustBePositive, mustBeInteger}
+                targetIdx   (1,1) double {mustBePositive, mustBeInteger}
+            end
+
+            if ~obj.hasEdge(sourceIdx, targetIdx)
+                error('Ребро %d->%d не существует', sourceIdx, targetIdx);
+            end
+
+            sourceNode = obj.ListOfNodes(sourceIdx);
+            targetNode = obj.ListOfNodes(targetIdx);
+            edge = sourceNode.getEdgeToTarget(targetNode);
+            alpha = edge.Alfa;
+            beta = edge.Beta;
+        end
+
+        function cloned = clone(obj)
+            % Создаёт глубокую копию графа (новые Node/Edge, те же генераторы)
+            n = numel(obj.ListOfNodes);
+
+            % 1. Создаём новые вершины с теми же свойствами
+            newNodes = BWGraph.Node.empty(0, 1);
+            for i = 1:n
+                origNode = obj.ListOfNodes(i);
+                nodeFunc = origNode.getNodeFunction();
+                newNode = BWGraph.Node(...
+                    origNode.ID, ...
+                    origNode.getFResult(), ...
+                    origNode.getNodeType(), ...
+                    nodeFunc, ...
+                    origNode.getActivationType());
+                newNode.Gamma = origNode.Gamma;
+                newNodes(end+1) = newNode;
+            end
+
+            % 2. Восстанавливаем рёбра
+            for i = 1:n
+                origNode = obj.ListOfNodes(i);
+                edges = origNode.getOutEdges();
+                for k = 1:numel(edges)
+                    edge = edges(k);
+                    targetNode = edge.TargetNode;
+                    targetIdx = find(obj.ListOfNodes == targetNode, 1);
+                    if ~isempty(targetIdx)
+                        newNodes(i).addEdge(newNodes(targetIdx));
+                        newEdge = newNodes(i).getEdgeToTarget(newNodes(targetIdx));
+                        newEdge.Alfa = edge.Alfa;
+                        newEdge.Beta = edge.Beta;
+                    end
+                end
+            end
+
+            % 3. Создаём GraphShell (конструктор вызовет Generate — параметры перезапишутся)
+            gammas = [newNodes.Gamma];
+            nodeCellArray = num2cell(newNodes);
+            cloned = BWGraph.GraphShell(obj.BetaGenerator, gammas, nodeCellArray{:});
+
+            % 3b. Восстанавливаем ПРАВИЛЬНЫЕ параметры рёбер (конструктор перегенерировал их)
+            for i = 1:n
+                origNode = obj.ListOfNodes(i);
+                edges = origNode.getOutEdges();
+                for k = 1:numel(edges)
+                    edge = edges(k);
+                    targetNode = edge.TargetNode;
+                    targetIdx = find(obj.ListOfNodes == targetNode, 1);
+                    if ~isempty(targetIdx)
+                        clonedEdge = cloned.ListOfNodes(i).getEdgeToTarget(cloned.ListOfNodes(targetIdx));
+                        clonedEdge.Alfa = edge.Alfa;
+                        clonedEdge.Beta = edge.Beta;
+                    end
+                end
+            end
+
+            % 4. Копируем внутреннее состояние
+            cloned.fi_result = obj.fi_result;
+            cloned.cachedEdgeHash = ''; % Кеш прямого прохода должен перестроиться
+            cloned.numOfWhiteNodes = obj.numOfWhiteNodes;
+            cloned.numOfBlackNodes = obj.numOfBlackNodes;
+        end
+
+        function DrawNodeTable(obj, ax)
+            % Таблица вершин: ID, тип, gamma, gCtx
+            axes(ax); cla(ax); axis off; hold on;
+
+            nodeIDs = [obj.ListOfNodes.ID];
+            nodeGammas = [obj.ListOfNodes.Gamma];
+            nodeGammaCtxs = [obj.ListOfNodes.GammaCtx];
+
+            if obj.NumStages > 1
+                nodeRows = {sprintf('%-6s %-5s %-10s %-10s', 'Узел', 'Тип', '\gamma', '\gamma_C');
+                            repmat('-', 1, 27)};
+                for i = 1:numel(obj.ListOfNodes)
+                    nt = obj.ListOfNodes(i).getNodeType();
+                    ts = 'Б'; if nt == BWGraph.NodeColor.Black, ts = 'Ч'; end
+                    nodeRows{end+1} = sprintf('v_{%d}   %s     %5.2f  %5.2f', ...
+                        nodeIDs(i), ts, nodeGammas(i), nodeGammaCtxs(i));
+                end
+            else
+                nodeRows = {sprintf('%-6s %-5s %-10s', 'Узел', 'Тип', '\gamma');
+                            repmat('-', 1, 20)};
+                for i = 1:numel(obj.ListOfNodes)
+                    nt = obj.ListOfNodes(i).getNodeType();
+                    ts = 'Б'; if nt == BWGraph.NodeColor.Black, ts = 'Ч'; end
+                    nodeRows{end+1} = sprintf('v_{%d}   %5s   %5.2f', ...
+                        nodeIDs(i), ts, nodeGammas(i));
+                end
+            end
+            nodeStr = strjoin(nodeRows, '\n');
+
+            text(0.05, 0.95, strrep(nodeStr, '_', '_'), 'Units', 'normalized', ...
+                'FontName', 'Courier New', 'FontSize', 11, ...
+                'VerticalAlignment', 'top', 'HorizontalAlignment', 'left', ...
+                'BackgroundColor', [1 1 1], 'EdgeColor', [0.5 0.5 0.5], 'Margin', 3, "Interpreter", "tex");
+            title('Вершины', 'FontSize', 12);
+        end
+
+        function DrawEdgeTable(obj, ax)
+            % Таблица рёбер: src->dst, alpha, beta
+            axes(ax); cla(ax); axis off; hold on;
+
+            edgeSrc = []; edgeTgt = []; edgeAl = []; edgeBt = [];
+            for i = 1:numel(obj.ListOfNodes)
+                edges = obj.ListOfNodes(i).getOutEdges();
+                for j = 1:numel(edges)
+                    e = edges(j);
+                    edgeSrc(end+1) = e.SourceNode.ID;
+                    edgeTgt(end+1) = e.TargetNode.ID;
+                    edgeAl(end+1) = e.Alfa;
+                    edgeBt(end+1) = e.Beta;
+                end
+            end
+
+            if isempty(edgeSrc)
+                text(0.5, 0.5, 'Нет рёбер', 'Units', 'normalized', ...
+                    'HorizontalAlignment', 'center', 'FontSize', 10);
+            else
+                edgeRows = {sprintf('%-6s %-10s %-10s', 'Ребро', '\alpha', '\beta');
+                            repmat('-', 1, 22)};
+                for e = 1:numel(edgeSrc)
+                    edgeRows{end+1} = sprintf('%d->%d  %5.2f  %5.2f', ...
+                        edgeSrc(e), edgeTgt(e), edgeAl(e), edgeBt(e));
+                end
+                edgeStr = strjoin(edgeRows, '\n');
+
+                text(0.05, 0.95, edgeStr, 'Units', 'normalized', ...
+                    'FontName', 'Courier New', 'FontSize', 11, ...
+                    'VerticalAlignment', 'top', 'HorizontalAlignment', 'left', ...
+                    'BackgroundColor', [1 1 1], 'EdgeColor', [0.5 0.5 0.5], 'Margin', 3);
+            end
+            title('Рёбра', 'FontSize', 12);
+        end
+
+        function DrawParamTables(obj, ax)
+            % Таблица параметров вершин в нижнем левом углу графа
+            axes(ax); hold on;
+
+            nodeIDs = [obj.ListOfNodes.ID];
+            nodeGammas = [obj.ListOfNodes.Gamma];
+            nodeGammaCtxs = [obj.ListOfNodes.GammaCtx];
+
+            if obj.NumStages > 1
+                nodeRows = {sprintf('%-6s %-6s %-6s %s', 'Узел', 'Тип', '\gamma', '\gamma_C');
+                            repmat('-', 1, 27)};
+                for i = 1:numel(obj.ListOfNodes)
+                    nt = obj.ListOfNodes(i).getNodeType();
+                    ts = 'W'; if nt == BWGraph.NodeColor.Black, ts = 'B'; end
+                    nodeRows{end+1} = sprintf('v_{%d}   %s      %5.2f  %5.2f', ...
+                        nodeIDs(i), ts, nodeGammas(i), nodeGammaCtxs(i));
+                end
+            else
+                nodeRows = {sprintf('%-6s %-6s %-6s', 'Узел', 'Тип', '\gamma');
+                            repmat('-', 1, 21)};
+                for i = 1:numel(obj.ListOfNodes)
+                    nt = obj.ListOfNodes(i).getNodeType();
+                    ts = 'W'; if nt == BWGraph.NodeColor.Black, ts = 'B'; end
+                    nodeRows{end+1} = sprintf('v_{%d}   %s      %5.2f', ...
+                        nodeIDs(i), ts, nodeGammas(i));
+                end
+            end
+            nodeStr = strjoin(nodeRows, '\n');
+
+            xlims = xlim; ylims = ylim;
+            tfs = 10;
+            text(xlims(1) + 0.02*(xlims(2)-xlims(1)), ...
+                 ylims(1) + 0.02*(ylims(2)-ylims(1)), ...
+                 strrep(nodeStr, '_', '\_'), ...
+                 'FontName', 'Courier New', 'FontSize', tfs, ...
+                 'VerticalAlignment', 'bottom', 'HorizontalAlignment', 'left', ...
+                 'BackgroundColor', [1 1 1], 'EdgeColor', [0.5 0.5 0.5], 'Margin', 3);
+        end
+
     end
 
     methods(Access = private)
@@ -864,8 +1464,8 @@ classdef GraphShell < handle
             % Возвращает индексы вершин в топологическом порядке
             % Используется для правильного вычисления производных
 
-            num_nodes = numel(obj.ListOfNodes);
-            visited = false(1, num_nodes);
+            numNodes = numel(obj.ListOfNodes);
+            visited = false(1, numNodes);
             topologicalOrder = [];
 
             % Функция для DFS
@@ -887,11 +1487,11 @@ classdef GraphShell < handle
                     end
                 end
 
-                topologicalOrder = [nodeIdx, topologicalOrder];
+                topologicalOrder = [topologicalOrder, nodeIdx];
             end
 
             % Обход всех вершин
-            for i = 1:num_nodes
+            for i = 1:numNodes
                 if ~visited(i)
                     visit(i);
                 end

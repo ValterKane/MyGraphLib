@@ -23,11 +23,14 @@ classdef Trainer < handle
         vBt
         mGm
         vGm
+        mGmCtx
+        vGmCtx
         t
         % Параметры
         bestAl                     % Лучшие альфа-значения по результатам настройки
         bestBt                     % Лучшие бета-значения по результатам настройки
         bestGm                     % Лучшие gamma-значения по результатам настройки
+        bestGmCtx                  % Лучшие GammaCtx-значения
         
         % Остальные параметры 
         graph                   BWGraph.GraphShell    % Графовая модель
@@ -52,8 +55,25 @@ classdef Trainer < handle
         % -- Параметры настройки на плато ---
         plateauCount = 0;         % Счетчик плато
         maxPlateauCount = 10;     % Максимальное количество плато перед остановкой
-        randomShiftScale = 0.2;  % Масштаб случайного смещения параметров
+
         % -----------------------------------
+        % Автоматическая калибровка клиппинга
+        clipAutoCalibrated (1,1) logical = false
+        calibratedClipUpAl   (1,1) double = 0
+        calibratedClipDownAl (1,1) double = 0
+        calibratedClipUpBt   (1,1) double = 0
+        calibratedClipDownBt (1,1) double = 0
+        calibratedClipUpGm   (1,1) double = 0
+        calibratedClipDownGm (1,1) double = 0
+        calibratedClipUpGmCtx   (1,1) double = 0
+        calibratedClipDownGmCtx (1,1) double = 0
+        % Структурный поиск: визуализация
+        rejectedEdges           % Матрица [N×2] отклонённых рёбер (src, dst) за текущий шаг
+        % Глобальный кеш проверенных рёбер (между шагами поиска)
+        globalEdgeCache              % containers.Map: ключ "src->dst" → struct(error, graphHash, removedInStep)
+        structuralSearchStepCount = 0  % Счётчик шагов структурного поиска
+        structuralSearchConverged = false  % Все комбинации проверены, оптимум найден
+        cleanupDone = false                 % Зачистка выполнена (однократно)
     end
 
     methods (Access = public)
@@ -67,6 +87,12 @@ classdef Trainer < handle
             obj.nodes = Graph.ListOfNodes;
             obj.TrainingOptions = TrainingOptions;
 
+            % Многоэтапный Forward (по умолчанию 1 — классический режим)
+            obj.graph.NumStages = TrainingOptions.ContextStages;
+
+            % Генерация α с учётом топологии через публичный метод GraphShell
+            obj.graph.GenerateTopologyAwareAlpha(TrainingOptions.AlphaSafetyFactor);
+
             % Инициализация структур для хранения лучших параметров
             nodes = obj.graph.ListOfNodes;
             numNodes = numel(nodes);
@@ -75,6 +101,7 @@ classdef Trainer < handle
             obj.bestAl = zeros(numNodes, numNodes);
             obj.bestBt = zeros(numNodes, numNodes);
             obj.bestGm = zeros(numNodes);
+            obj.bestGmCtx = zeros(numNodes);
 
             % Заполняем начальными значениями
             for i = 1:numNodes
@@ -137,23 +164,33 @@ classdef Trainer < handle
             errorDiffs = zeros(1, obj.TrainingOptions.Epoches);
 
             % Создаем фигуру для графиков
-            figure('Name', 'Training Progress', 'NumberTitle', 'off', 'Position', [100 100 900 800]);
-            % Создаем 4 субграфика в 2 колонки
-            ax1 = subplot(2,2,1);  % Ошибки
-            ax2 = subplot(2,2,2);  % Learning rate (логарифмическая шкала)
-            ax3 = subplot(2,2,3);  % Время эпохи
-            ax4 = subplot(2,2,4);  % Использование памяти
+            figure('Name', 'Training Progress', 'NumberTitle', 'off', 'Position', [100 100 1200 1000]);
+            ax1 = subplot(3,3,[1,2]);  % Ошибки (широкий)
+            ax2 = subplot(3,3,3);      % LR
+            ax3 = subplot(3,3,[4,5]);  % Время эпохи (широкий)
+            ax4 = subplot(3,3,6);      % Матрица смежности
+            ax5 = subplot(3,3,7);      % Таблица вершин (gamma, gCtx)
+            ax6 = subplot(3,3,8);      % Таблица рёбер (alpha, beta)
+            ax7 = subplot(3,3,9);      % Визуальный граф
+            obj.rejectedEdges = zeros(0, 2);
+            obj.UpdateStructuralPlot(ax4);
+            obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
 
             fprintf('Старт процесса настройки. ЦФ=%s, Метрика=%s\n', obj.TrainingOptions.LossFunction, obj.TrainingOptions.ErrorMetric);
 
-            for epoch = 1:obj.TrainingOptions.Epoches
-                % Динамическое уменьшение LR
-                if mod(epoch, 20) == 0
-                    LearningRate = LearningRate / 2;
-                end
+            % Инициализация Алгоритма 1 (рукопись, стр. 488)
+            c_no = 0;      % Счётчик эпох без улучшения
+            c_p = 0;       % Счётчик выходов из плато (Rp-операций)
+            p_e = obj.maxPlateauCount;    % Порог идентификации плато
+            p_p = 3;                       % Макс. число Rp-операций
+            eta_init = LearningRate;
+            topologyChangedEpochs = [];
 
-                if epoch > 0.8*obj.TrainingOptions.Epoches
-                    LearningRate = 0.005;
+            for epoch = 1:obj.TrainingOptions.Epoches
+                % LR-шедулинг по формуле (3.13): каждые LRDecayInterval эпох
+                if mod(epoch, obj.TrainingOptions.LRDecayInterval) == 0
+                    LearningRate = max(obj.minLr, eta_init / sqrt(epoch));
+                    obj.TrainingOptions.LearningRate = LearningRate;
                 end
 
                 epochStart = tic;
@@ -161,32 +198,52 @@ classdef Trainer < handle
                 % Основной алгоритм настройки
                 obj.Compute_V5(XDataTrain, YDataTrain);
 
-                fprintf('\nНастройка на эпохе №%d завершена!\n',epoch)
+                fprintf('\nНастройка на эпохе No%d завершена!\n',epoch)
                 trainEerror = obj.trainErrors(end);
 
-                % Расчет ошибки на тестовой выборке
+                % Расчет ошибки на тестовой выборке ПОСЛЕ обучения
                 fprintf('\nВыполняю расчет метрики на тестовой выборке...\n')
                 testError = obj.CalculateError(XDataTest, YDataTest, obj.TrainingOptions.TargetNodeIndices, obj.TrainingOptions.ErrorMetric);
                 obj.testErrors(end+1) = testError;
 
-                % Вычисление разницы между ошибками
+                % Вычисление разницы между ошибками (на параметрах ПОСЛЕ обучения)
                 errorDiffs(epoch) = testError - trainEerror;
-                
+
                 % Проверка критериев остановки
                 stopTraining = false;
                 stopReason = '';
-                
+
                 % Проверка улучшения на тестовой выборке
                 if testError < obj.bestTestError - obj.minDelta
                     obj.bestTestError = testError;
-                    % Сохраняем лучшие параметры
+                    c_no = 0;   % Сброс счётчика без улучшений (Алгоритм 1, стр. 506)
                     obj.SaveBestParameters();
+                else
+                    c_no = c_no + 1;  % (Алгоритм 1, стр. 509)
                 end
-                %     stopTraining = true;
-                %     stopReason = ... 
-                %         sprintf('Не обнаружено серьезного изменения в ошибке на тестовом множестве (%s = %3f',obj.TrainingOptions.ErrorMetric, testError);
-                % end
 
+                % При застревании — корректировка LR (Алгоритм 1, стр. 511-514)
+                if obj.TrainingOptions.EnablePlateauEscape && c_no > 0 && mod(c_no, 5) == 0
+                    LearningRate = max(obj.minLr, eta_init / sqrt(epoch));
+                    obj.TrainingOptions.LearningRate = LearningRate;
+                end
+
+                % Выход из плато через Rp (Алгоритм 1, стр. 515-524)
+                if obj.TrainingOptions.EnablePlateauEscape && c_no >= p_e
+                    if c_p >= p_p
+                        stopTraining = true;
+                        stopReason = sprintf('Исчерпаны попытки выхода из плато (c_p=%d)', c_p);
+                    else
+                        obj.RandomShiftParameters();
+                        c_no = 0;
+                        c_p = c_p + 1;
+                        LearningRate = eta_init;
+                        obj.TrainingOptions.LearningRate = LearningRate;
+                        fprintf('[Plateau] Rp-оператор применён (c_p=%d/%d)\n', c_p, p_p);
+                    end
+                end
+
+                % Обнаружение переобучения
                 if epoch > 1
                     if errorDiffs(end-1) > 0 && errorDiffs(end) < 0 ...
                             || errorDiffs(end-1) < 0 && errorDiffs(end) >0
@@ -221,6 +278,11 @@ classdef Trainer < handle
                 hold(ax1, 'on');
                 plot(ax1, 1:epoch, obj.testErrors, 'r-', 'LineWidth', 1.5);
 
+                % Пунктирные линии в моменты изменения структуры
+                yLimits = ylim(ax1);
+                for e = topologyChangedEpochs
+                    plot(ax1, [e e], yLimits, 'k--', 'LineWidth', 0.7, 'HandleVisibility', 'off');
+                end
                 hold(ax1, 'off');
                 title(ax1, 'Ошибки настройки и тестирования');
                 xlabel(ax1, 'Итерация');
@@ -229,9 +291,9 @@ classdef Trainer < handle
                 grid(ax1, 'on');
 
                 % График learning rate в логарифмической шкале
-                semilogy(ax2, 1:epoch, obj.learningRate * ones(1, epoch), 'r.', 'MarkerSize', 10);
+                semilogy(ax2, 1:epoch, LearningRate * ones(1, epoch), 'r.', 'MarkerSize', 10);
                 hold(ax2, 'on');
-                semilogy(ax2, 1:epoch, obj.learningRate * ones(1, epoch), 'r-', 'LineWidth', 0.5);
+                semilogy(ax2, 1:epoch, LearningRate * ones(1, epoch), 'r-', 'LineWidth', 0.5);
                 hold(ax2, 'off');
                 title(ax2, 'Шаг настройки (логарифмическая шкала)');
                 xlabel(ax2, 'Итерация');
@@ -246,26 +308,68 @@ classdef Trainer < handle
                 ylabel(ax3, 'Время (сек)');
                 grid(ax3, 'on');
 
-                % График разницы между ошибками
-                plot(ax4, 1:epoch, errorDiffs(1:epoch), 'm-', 'LineWidth', 1.5);
-                hold(ax4, 'on');
-                % Линия нуля для reference
-                plot(ax4, [1 epoch], [0 0], 'k--', 'LineWidth', 1);
-                hold(ax4, 'off');
-                title(ax4, 'Разница между между ошибками тестирования и настройки');
-                xlabel(ax4, 'Итерация');
-                ylabel(ax4, '\Delta E');
-                legend(ax4, {'Разница ошибок', 'Нулевая линия'}, 'Location', 'best');
-                grid(ax4, 'on');
+                % Обновление визуального графа (текущие α, β, γ после обучения)
+                obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
 
                 drawnow; % Обновляем графики
 
-                % Восстанавливаем лучшие параметры
-                obj.RestoreBestParameters();
+                % RestoreBestParameters отключён в цикле — даём модели шанс
+                % пройти через «плохие» состояния к потенциально лучшим.
+                % Восстановление происходит только в конце обучения (строка 350).
+
+                % --- Структурный поиск (если включен и не сошёлся) ---
+                if obj.TrainingOptions.EnableStructuralSearch && ...
+                   ~obj.structuralSearchConverged && ...
+                   mod(epoch, obj.TrainingOptions.StructuralSearchInterval) == 0
+                    fprintf('\n[Структурная оптимизация] Поиск оптимальной топологии (эпоха %d)...\n', epoch);
+                    topologyChanged = obj.StructuralSearchStep(XDataTrain, YDataTrain, XDataTest, YDataTest);
+                    obj.UpdateStructuralPlot(ax4);
+                    obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
+                    if topologyChanged
+                        obj.nodes = obj.graph.ListOfNodes;
+                        topologyChangedEpochs(end+1) = epoch;
+                        c_no = 0;
+                        fprintf('[Структурная оптимизация] Топология изменена.\n');
+                    end
+                end
             end
 
-            % Финализация графиков
-            sgtitle(sprintf('Обучение завершено на эпохе %d (Лучшая тестовая %s: %.4f)', epoch, obj.TrainingOptions.ErrorMetric, obj.bestTestError));
+            % Зачистка бесполезных рёбер после конвергенции (однократно)
+            if obj.structuralSearchConverged && ~obj.cleanupDone
+                obj.CleanupRedundantEdges(XDataTest, YDataTest);
+                obj.cleanupDone = true;
+            end
+
+            % Восстанавливаем лучшие параметры (в т.ч. после ранней остановки)
+            obj.RestoreBestParameters();
+
+            % Финальное обновление всех графиков
+            plot(ax1, 1:epoch, obj.trainErrors, 'b-', 'LineWidth', 1.5);
+            hold(ax1, 'on');
+            plot(ax1, 1:epoch, obj.testErrors, 'r-', 'LineWidth', 1.5);
+            yLimits = ylim(ax1);
+            for e = topologyChangedEpochs
+                plot(ax1, [e e], yLimits, 'k--', 'LineWidth', 0.7, 'HandleVisibility', 'off');
+            end
+            hold(ax1, 'off');
+            title(ax1, 'Ошибки настройки и тестирования');
+            xlabel(ax1, 'Итерация');
+            ylabel(ax1, sprintf('%s', obj.TrainingOptions.ErrorMetric));
+            legend(ax1, {'Train', 'Test'}, 'Location', 'best');
+            grid(ax1, 'on');
+
+            plot(ax3, 1:epoch, epochTimes(1:epoch), 'g-', 'LineWidth', 1.5);
+            title(ax3, 'Время расчета эпохи');
+            xlabel(ax3, 'Итерация');
+            ylabel(ax3, 'Время (сек)');
+            grid(ax3, 'on');
+
+            obj.UpdateStructuralPlot(ax4);
+            obj.graph.DrawGraph_New([], ax7, true); obj.graph.DrawNodeTable(ax5); obj.graph.DrawEdgeTable(ax6);
+
+            sgtitle(sprintf('Обучение завершено (эпоха %d). Лучшая %s: %.4f', ...
+                epoch, obj.TrainingOptions.ErrorMetric, obj.bestTestError));
+            drawnow;
         end
 
         function graph = GetGraph(obj)
@@ -283,12 +387,14 @@ classdef Trainer < handle
             obj.bestAl = zeros(numNodes, numNodes);
             obj.bestBt = zeros(numNodes, numNodes);
             obj.bestGm = zeros(numNodes);
+            obj.bestGmCtx = zeros(numNodes);
 
             % Сохраняем текущие значения
             for i = 1:numNodes
                 node = obj.nodes(i);
                 edges = node.getOutEdges();
                 obj.bestGm(i) = node.Gamma;
+                obj.bestGmCtx(i) = node.GammaCtx;
                 for j = 1:numel(edges)
                     edge = edges(j);
                     targetId = edge.TargetNode.ID;
@@ -305,6 +411,7 @@ classdef Trainer < handle
                 node = obj.nodes(i);
                 edges = node.getOutEdges();
                 node.Gamma = obj.bestGm(i);
+                node.GammaCtx = obj.bestGmCtx(i);
                 for j = 1:numel(edges)
                     edge = edges(j);
                     targetId = edge.TargetNode.ID;
@@ -315,107 +422,87 @@ classdef Trainer < handle
         end
 
         function RandomShiftParameters(obj)
-            % Применяет случайное смещение к параметрам графа
+            % Rp-оператор (формула 3.12): случайное смещение параметров на ±RpShiftPercent%
+            pct = obj.TrainingOptions.RpShiftPercent / 100;
             obj.nodes = obj.graph.ListOfNodes;
             for i = 1:numel(obj.nodes)
                 node = obj.nodes(i);
                 edges = node.getOutEdges();
                 for j = 1:numel(edges)
                     edge = edges(j);
-
-                    % Генерируем случайные смещения
-                    randomShiftAl = (rand() * 2 - 1) * obj.randomShiftScale;
-                    randomShiftBt = (rand() * 2 - 1) * obj.randomShiftScale;
-
-                    % Применяем смещения
-                    edge.Alfa = edge.Alfa + randomShiftAl;
-                    edge.Beta = edge.Beta + randomShiftBt;
+                    edge.Alfa = edge.Alfa * (1 + (rand() * 2 - 1) * pct);
+                    edge.Beta = edge.Beta * (1 + (rand() * 2 - 1) * pct);
                 end
+                node.Gamma = node.Gamma * (1 + (rand() * 2 - 1) * pct);
+                node.GammaCtx = node.GammaCtx * (1 + (rand() * 2 - 1) * pct);
             end
         end
 
         function errorValue = CalculateError(obj, XData, YData, whiteNodeIndices, errorMetric)
-            % Обновленный метод CalculateError с поддержкой:
-            % - выбора белых вершин
-            % - выбора метрики ошибки (MAE или MAPE)
+            % Вычисляет метрику на тестовой выборке.
+            % Первый вызов Forward строит кеш M⁻¹; остальные — O(n²).
+            % Поддерживает: mae, mse, rmse, mape.
 
-            % Параметры по умолчанию
             if nargin < 4 || isempty(whiteNodeIndices)
                 whiteNodeIndices = obj.graph.GetWhiteNodesIndices();
             end
-            if nargin < 5
-                errorMetric = 'mae'; % По умолчанию MAE
+            if nargin < 5 || isempty(errorMetric)
+                errorMetric = 'mae';
             end
 
-            % Проверка допустимых значений метрики
-            validMetrics = {'mae', 'mape'};
-            if ~any(strcmpi(errorMetric, validMetrics))
-                error('Недопустимая метрика ошибки. Допустимые значения: ''mae'', ''mape''');
+            validMetrics = {'mae', 'mse', 'rmse', 'mape'};
+            metric = lower(errorMetric);
+            if ~any(strcmpi(metric, validMetrics))
+                error('Недопустимая метрика: %s. Допустимы: %s', metric, strjoin(validMetrics, ', '));
             end
 
-            % 1. Проверка входных данных
             if length(XData) ~= length(YData)
                 error('Размеры XData и YData должны совпадать');
             end
-
             if isempty(whiteNodeIndices)
-                errorValue = NaN;
-                return;
+                errorValue = NaN; return;
             end
 
-            % 2. Инициализация
-            totalError = 0;
-            totalPoints = 0;
+            allWhiteIndices = obj.graph.GetWhiteNodesIndices();
+            [~, loc] = ismember(whiteNodeIndices, allWhiteIndices);
+            numSamples = length(XData);
+            nWhite = length(whiteNodeIndices);
+            totalPoints = numSamples * nWhite;
 
-            % 3. Основной цикл по примерам
-            for i = 1:length(XData)
-                % Проверка типов
-                if ~isa(XData(i), 'BWGraph.CustomMatrix.BWMatrix') || ...
-                        ~isa(YData(i), 'BWGraph.CustomMatrix.BWMatrix')
-                    error('Неверный тип данных');
-                end
-    
-                % Прямой проход
+            % Предвыделяем массивы для векторного вычисления
+            allPred = zeros(totalPoints, 1);
+            allTrue = zeros(totalPoints, 1);
+
+            idx = 1;
+            for i = 1:numSamples
+                % Быстрый прямой проход (M⁻¹ кеширован, O(n²) вместо O(n³))
                 obj.graph.Forward(XData(i));
                 pred = obj.graph.GetModelResults();
-
-                % Выбираем только указанные белые узлы
                 selectedPred = pred(whiteNodeIndices);
-                selectedTrue = YData(i).getRow(1);  % Получаем все значения белых узлов
-
-                % Выбираем только указанные индексы
-                allWhiteIndices = obj.graph.GetWhiteNodesIndices();
-                [~, loc] = ismember(whiteNodeIndices, allWhiteIndices);
+                selectedTrue = YData(i).getRow(1);
                 selectedTrue = selectedTrue(loc);
 
-                % Проверка размерности
-                if length(selectedTrue) ~= length(whiteNodeIndices)
-                    error('Несоответствие размеров в YData');
+                for w = 1:nWhite
+                    allPred(idx) = selectedPred(w);
+                    allTrue(idx) = selectedTrue(w);
+                    idx = idx + 1;
                 end
-
-                % Расчет ошибки в зависимости от выбранной метрики
-                switch lower(errorMetric)
-                    case 'mae'
-                        % Средняя абсолютная ошибка
-                        totalError = totalError + sum(abs(selectedPred - selectedTrue));
-                    case 'mape'
-                        % Средняя абсолютная процентная ошибка (с защитой от деления на 0)
-                        epsilon = 1e-10; % Малое значение для избежания деления на 0
-                        absTrue = abs(selectedTrue);
-                        absTrue(absTrue < epsilon) = epsilon; % Заменяем нули на epsilon
-                        totalError = totalError + sum(abs(selectedPred - selectedTrue) ./ absTrue);
-                end
-                totalPoints = totalPoints + length(whiteNodeIndices);
-
-                obj.updateProgress(i, length(XData));
             end
 
-            % 4. Финальное усреднение
-            switch lower(errorMetric)
+            errors = allPred - allTrue;
+
+            switch metric
                 case 'mae'
-                    errorValue = totalError / totalPoints;
+                    errorValue = mean(abs(errors));
+                case 'mse'
+                    errorValue = mean(errors.^2);
+                case 'rmse'
+                    errorValue = sqrt(mean(errors.^2));
                 case 'mape'
-                    errorValue = (totalError / totalPoints) * 100; % В процентах
+                    epsVal = 1e-10;
+                    absTrue = abs(allTrue);
+                    absTrue(absTrue < epsVal) = epsVal;
+                    errorValue = 100 * mean(abs(errors) ./ absTrue);
             end
         end
 
@@ -507,14 +594,6 @@ classdef Trainer < handle
                     obj.incomingNeighborsCache{i} = obj.graph.getIncomingNeighbors(obj.nodes(i));
                 end
             end
-            
-            % Кэшируем индексы
-            if isempty(obj.NodeIndexMap)
-                obj.NodeIndexMap = containers.Map('KeyType', 'char', 'ValueType', 'double');
-                for idx = 1:numNodes
-                    obj.NodeIndexMap(class(obj.nodes(idx))) = idx;
-                end
-            end
 
             % Инициализация моментов ADAM
             if isempty(obj.mAl)
@@ -524,6 +603,8 @@ classdef Trainer < handle
                 obj.vBt = cell(numNodes, 1);
                 obj.mGm = cell(numNodes, 1);
                 obj.vGm = cell(numNodes, 1);
+                obj.mGmCtx = cell(numNodes, 1);
+                obj.vGmCtx = cell(numNodes, 1);
                 numEdgesPerNode = cellfun(@numel, obj.outgoingEdgesCache);
                 for i = 1:numNodes
                     obj.mAl{i} = zeros(1, numEdgesPerNode(i));
@@ -532,6 +613,8 @@ classdef Trainer < handle
                     obj.vBt{i} = zeros(1, numEdgesPerNode(i));
                     obj.mGm{i} = 0;
                     obj.vGm{i} = 0;
+                    obj.mGmCtx{i} = 0;
+                    obj.vGmCtx{i} = 0;
                 end
                 obj.t = 0;
             end
@@ -542,10 +625,28 @@ classdef Trainer < handle
             total_points = 0;
             numBatches = ceil(numSamples / obj.TrainingOptions.BatchSize);
 
+            % --- Разрешение раздельных границ клиппинга ---
+            % Приоритет: 1) откалиброванные, 2) специфичные из TrainingOptions, 3) общие ClipUp/ClipDown
+            if obj.clipAutoCalibrated
+                clipUpAl = obj.calibratedClipUpAl; clipDownAl = obj.calibratedClipDownAl;
+                clipUpBt = obj.calibratedClipUpBt; clipDownBt = obj.calibratedClipDownBt;
+                clipUpGm = obj.calibratedClipUpGm; clipDownGm = obj.calibratedClipDownGm;
+                clipUpGmCtx = obj.calibratedClipUpGmCtx; clipDownGmCtx = obj.calibratedClipDownGmCtx;
+            else
+                clipUpAl = obj.TrainingOptions.ClipUp_Alpha;   if isempty(clipUpAl), clipUpAl = obj.TrainingOptions.ClipUp; end
+                clipDownAl = obj.TrainingOptions.ClipDown_Alpha; if isempty(clipDownAl), clipDownAl = obj.TrainingOptions.ClipDown; end
+                clipUpBt = obj.TrainingOptions.ClipUp_Beta;     if isempty(clipUpBt), clipUpBt = obj.TrainingOptions.ClipUp; end
+                clipDownBt = obj.TrainingOptions.ClipDown_Beta;  if isempty(clipDownBt), clipDownBt = obj.TrainingOptions.ClipDown; end
+                clipUpGm = obj.TrainingOptions.ClipUp_Gamma;    if isempty(clipUpGm), clipUpGm = obj.TrainingOptions.ClipUp; end
+                clipDownGm = obj.TrainingOptions.ClipDown_Gamma; if isempty(clipDownGm), clipDownGm = obj.TrainingOptions.ClipDown; end
+                clipUpGmCtx = clipUpGm; clipDownGmCtx = clipDownGm;  % GammaCtx использует те же границы, что и Gamma
+            end
+
             % Инициализация градиентов по всем батчам
             batchAlGrad = cell(numNodes, numBatches);
             batchBtGrad = cell(numNodes, numBatches);
             batchGmGrad = cell(numNodes, numBatches);
+            batchGmCtxGrad = cell(numNodes, numBatches);
 
             % Инициализация дельта-массивов для всего батча
             delta_in_cache = cell(numNodes, numBatches);
@@ -581,63 +682,31 @@ classdef Trainer < handle
                     outgoingEdges = obj.outgoingEdgesCache{i};
 
                     delta_in = zeros(1, numNodes);
-
                     if ~isempty(incomingEdges)
-                        % Векторизованная обработка входящих ребер
-                        sourceIndices = zeros(1, numel(incomingEdges));
-                        alphas = zeros(1, numel(incomingEdges));
-
                         for edge_idx = 1:numel(incomingEdges)
                             e = incomingEdges(edge_idx);
                             sourceNode = e.SourceNode;
-                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
-                            if ~isempty(sourceIdx)
-                                sourceIndices(edge_idx) = sourceIdx;
-                                alphas(edge_idx) = e.Alfa;
+                            sourceIdx = sourceNode.ID;
+                            if ~isempty(sourceIdx) && sourceIdx > 0
+                                % D(target): цепное правило ∂F_v/∂F_u = α/D(v)
+                                delta_in(sourceIdx) = e.Alfa / sum_alpha_out_plus_one(i);
                             end
                         end
-
-                        % Убираем нулевые индексы
-                        validIdx = sourceIndices > 0;
-                        sourceIndices = sourceIndices(validIdx);
-                        alphas = alphas(validIdx);
-
-                        % Заполняем delta_in
-                        for k = 1:numel(sourceIndices)
-                            delta_in(sourceIndices(k)) = alphas(k) / sum_alpha_out_plus_one(sourceIndices(k));
-                        end
                     end
-                    delta_in_cache{i,numBatches} = delta_in;
+                    delta_in_cache{i,batchIdx} = delta_in;
 
-                    % δ_Out для исходящих рёбер
                     delta_out = zeros(1, numNodes);
-
                     if ~isempty(outgoingEdges)
-                        targetIndices = zeros(1, numel(outgoingEdges));
-                        alphas = zeros(1, numel(outgoingEdges));
-
                         for edge_idx = 1:numel(outgoingEdges)
                             e = outgoingEdges(edge_idx);
                             targetNode = e.TargetNode;
-                            targetIdx = obj.NodeIndexMap(class(targetNode));
-                            if ~isempty(targetIdx)
-                                targetIndices(edge_idx) = targetIdx;
-                                alphas(edge_idx) = e.Alfa;
+                            targetIdx = targetNode.ID;
+                            if ~isempty(targetIdx) && targetIdx > 0
+                                delta_out(targetIdx) = e.Alfa / sum_alpha_out_plus_one(targetIdx);
                             end
                         end
-
-                        % Убираем нулевые индексы
-                        validIdx = targetIndices > 0;
-                        targetIndices = targetIndices(validIdx);
-                        alphas = alphas(validIdx);
-
-                        % Заполняем delta_out (используем предвычисленные суммы)
-                        for k = 1:numel(targetIndices)
-                            delta_out(targetIndices(k)) = alphas(k) / sum_alpha_out_plus_one(targetIndices(k));
-                        end
-
                     end
-                    delta_out_cache{i,numBatches} = delta_out;
+                    delta_out_cache{i,batchIdx} = delta_out;
                 end
 
                 for i = 1:numNodes
@@ -645,6 +714,7 @@ classdef Trainer < handle
                     batchAlGrad{i,batchIdx} = zeros(1, numEdges);
                     batchBtGrad{i,batchIdx} = zeros(1, numEdges);
                     batchGmGrad{i,batchIdx} = 0;
+                    batchGmCtxGrad{i,batchIdx} = 0;
                 end
                 
                 % --- Обработка примеров в батче ---
@@ -655,6 +725,7 @@ classdef Trainer < handle
 
                     % Прямой проход (использует исправленный Forward)
                     modelValues = obj.graph.GetCurrentResult(xMatrix);
+
                     % Здесь пока берется только одна белая вершина
                     targetValues = yMatrix.getRow(1);
 
@@ -723,13 +794,47 @@ classdef Trainer < handle
                         end
                     end
 
+                    % J_self для черных вершин (раздел 4.2, формула 4.10)
+                    J_self = zeros(1, numNodes);
+                    for b = obj.blackNodeIndices
+                        outgoingEdges = obj.outgoingEdgesCache{b};
+                        sum_alpha_out = sum([outgoingEdges.Alfa]);
+
+                        % Без исходящих рёбер J_self не определён (замечание 4.3)
+                        if sum_alpha_out == 0
+                            continue;
+                        end
+
+                        % G_In — вклад входящих соседей (формула 2.3)
+                        G_in = 0;
+                        incomingEdges = obj.incomingEdgesCache{b};
+                        for e_idx = 1:numel(incomingEdges)
+                            e = incomingEdges(e_idx);
+                            sourceNode = e.SourceNode;
+                            sourceIdx = sourceNode.ID;
+                            G_in = G_in + e.Alfa * modelValues(sourceIdx) + e.Beta;
+                        end
+
+                        % Σβ_out
+                        sum_beta_out = sum([outgoingEdges.Beta]);
+
+                        % F̃_b = (G_in − Σβ_out) / Σα_out — формула (4.10)
+                        % Только Σα_out, без +1 (замечание 4.3: исключаем долю собственного аппроксиматора)
+                        F_shadow = (G_in - sum_beta_out) / sum_alpha_out;
+
+                        F_b = modelValues(b);
+
+                        % Собственная структурная невязка: J_b^{self} = ℓ(F_b, F̃_b)
+                        J_self(b) = (F_b - F_shadow);
+                    end
+
                     J_total = zeros(1, numNodes);
                     J_total(obj.whiteNodeIndices) = J_white(obj.whiteNodeIndices);
 
+                    max_iterations = length(obj.blackNodeIndices) + 1;
+
                     A_in = eye(numNodes,numNodes);
                     A_out = eye(numNodes,numNodes);
-
-                    max_iterations = length(obj.blackNodeIndices) + 1;
 
                     for iter = 1:max_iterations
                         J_prev = J_total;
@@ -737,8 +842,9 @@ classdef Trainer < handle
                         updated = false;
 
                         for i = obj.blackNodeIndices
-                            delta_in = delta_in_cache{i,numBatches};
-                            delta_out = delta_out_cache{i,numBatches };
+                            delta_in = delta_in_cache{i,batchIdx};
+                            delta_out = delta_out_cache{i,batchIdx};
+
                             incomingNeighbors = obj.incomingNeighborsCache{i};
                             outgoingEdges = obj.outgoingEdgesCache{i}';
 
@@ -746,7 +852,7 @@ classdef Trainer < handle
                             sum_in = 0;
                             for neighbor = incomingNeighbors
                                 if ~isempty(neighbor)
-                                    neighborIdx = obj.NodeIndexMap(class(neighbor));
+                                    neighborIdx = neighbor.ID;
                                     if ~isempty(neighborIdx) && delta_in(neighborIdx) ~= 0
                                         if A_in(i, neighborIdx) == 0 && J_prev(neighborIdx) ~= 0
                                             sum_in = sum_in + delta_in(neighborIdx) * J_prev(neighborIdx);
@@ -760,7 +866,7 @@ classdef Trainer < handle
                             sum_out = 0;
                             for e = outgoingEdges
                                 targetNode = e.TargetNode;
-                                targetIdx = obj.NodeIndexMap(class(targetNode));
+                                targetIdx = targetNode.ID;
                                 if ~isempty(targetIdx) && delta_out(targetIdx) ~= 0
                                     if A_out(i, targetIdx) == 0 && J_prev(targetIdx) ~= 0
                                         sum_out = sum_out + delta_out(targetIdx) * J_prev(targetIdx);
@@ -769,7 +875,9 @@ classdef Trainer < handle
                                 end
                             end
 
-                            new_value = sum_in + sum_out;
+                            new_value = obj.TrainingOptions.Lambda_Self * J_self(i) ...
+                                + obj.TrainingOptions.Lambda_Struct * (sum_in + sum_out);
+
                             if new_value ~= 0 && new_value ~= J_new(i)
                                 J_new(i) = new_value;
                                 updated = true;
@@ -783,6 +891,32 @@ classdef Trainer < handle
                         end
                     end
 
+                    % --- Настройка ядровых функций (ITunableCoreF) ---
+                    % dJ/dC = J_total(i) / D(i,i), где D(i,i) = Σ(α_out + 1)
+                    % Не привязан к конкретным параметрам — работает с любой ITunableCoreF
+                    for i = 1:numNodes
+                        if J_total(i) == 0, continue; end
+
+                        nodeFunc = obj.nodes(i).getNodeFunction();
+                        if isempty(nodeFunc) || ~isa(nodeFunc, 'coreFunctions.ITunableCoreF')
+                            continue;
+                        end
+
+                        outgoingEdges = obj.outgoingEdgesCache{i};
+                        if ~isempty(outgoingEdges)
+                            denominator = 1 + sum([outgoingEdges.Alfa]);
+                        else
+                            denominator = 1;
+                        end
+
+                        dJ_dC = J_total(i) / denominator;
+                        nodeInputData = xMatrix.getRow(i);
+                        nodeFunc.TuneParameters(nodeInputData, dJ_dC);
+                    end
+
+                    % BPTT: обратное распространение через этапы (K > 1)
+                    dGammaCtx = obj.graph.BackpropContext(J_total(:));
+
                     % Вычисляем все производные в топологическом порядке
                     [alpha_derivatives, beta_derivatives, gamma_derivatives] = obj.graph.computeAllDerivativesInOrder(xMatrix);
 
@@ -795,7 +929,8 @@ classdef Trainer < handle
                         % Градиенты для вершины (gamma)
                         key_gamma = sprintf('node%d_gamma', i);
                         dF_dgamma = gamma_derivatives(key_gamma);
-                        batchGmGrad{i} = batchGmGrad{i} - dF_dgamma * J_total(i);
+                        h_i = obj.TrainingOptions.getNodeMultiplier(i);
+                        batchGmGrad{i,batchIdx} = batchGmGrad{i,batchIdx} - h_i * dF_dgamma * J_total(i);
                         
                         % Градиенты для исходящих рёбер (alpha и beta)
                         for j = 1:numel(edges)
@@ -813,9 +948,9 @@ classdef Trainer < handle
                                 dF_dbeta_out = beta_derivatives(key_beta);
                             end
 
-                            % Обновление градиентов с регуляризацией (формула 3.10-3.11)
-                            batchAlGrad{i,batchIdx}(j) = batchAlGrad{i,batchIdx}(j) - dF_dalpha_out * J_total(i);
-                            batchBtGrad{i,batchIdx}(j) = batchBtGrad{i,batchIdx}(j) - dF_dbeta_out * J_total(i);
+                            % Обновление градиентов (формула 3.10-3.11) с h_v
+                            batchAlGrad{i,batchIdx}(j) = batchAlGrad{i,batchIdx}(j) - h_i * dF_dalpha_out * J_total(i);
+                            batchBtGrad{i,batchIdx}(j) = batchBtGrad{i,batchIdx}(j) - h_i * dF_dbeta_out * J_total(i);
                         end
 
                         % Градиенты для входящих рёбер (alpha и beta)
@@ -823,7 +958,7 @@ classdef Trainer < handle
                         for j = 1:numel(incomingEdges)
                             edge = incomingEdges(j);
                             sourceNode = edge.SourceNode;
-                            sourceIdx = obj.NodeIndexMap(class(sourceNode));
+                            sourceIdx = sourceNode.ID;
 
                             if isempty(sourceIdx), continue; end
                             % Градиент для α
@@ -845,18 +980,29 @@ classdef Trainer < handle
 
                                 if ~isempty(edgePos)
                                     batchAlGrad{sourceIdx,batchIdx}(edgePos) = batchAlGrad{sourceIdx,batchIdx}(edgePos) - ...
-                                        dF_dalpha_in * J_total(i);
+                                        h_i * dF_dalpha_in * J_total(i);
                                     batchBtGrad{sourceIdx,batchIdx}(edgePos) = batchBtGrad{sourceIdx,batchIdx}(edgePos) - ...
-                                        dF_dbeta_in * J_total(i);
+                                        h_i * dF_dbeta_in * J_total(i);
                                 end
                             end
                         end
                     end
 
-                    % Добавляем L2 регуляризацию (λ₁ в формуле 3.7)
+                    % Аккумулируем BPTT-градиент GammaCtx (контекстный путь)
+                    for i = 1:numNodes
+                        if dGammaCtx(i) ~= 0
+                            h_i = obj.TrainingOptions.getNodeMultiplier(i);
+                            batchGmCtxGrad{i,batchIdx} = batchGmCtxGrad{i,batchIdx} - h_i * dGammaCtx(i);
+                        end
+                    end
+
+                    % Добавляем L2 регуляризацию (λ1 в формуле 3.7)
                     for i = 1:numNodes
                         % Регуляризация по gamma
-                        batchGmGrad{i} = batchGmGrad{i} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).Gamma;
+                        batchGmGrad{i,batchIdx} = batchGmGrad{i,batchIdx} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).Gamma;
+                        if obj.graph.NumStages > 1
+                            batchGmCtxGrad{i,batchIdx} = batchGmCtxGrad{i,batchIdx} + obj.TrainingOptions.Lambda_Gamma * obj.nodes(i).GammaCtx;
+                        end
                         edges = obj.outgoingEdgesCache{i};
                         for j = 1:numel(edges)
                             edge = edges(j);
@@ -866,17 +1012,67 @@ classdef Trainer < handle
                     end
                 end
 
-                % --- Нормализация и обрезка градиентов ---
+                % --- Нормализация градиентов ---
                 invNumInBatch = 1 / numInBatch;
                 for i = 1:numNodes
                     if ~isempty(batchAlGrad{i,batchIdx})
-                        batchAlGrad{i,batchIdx} = min(max(batchAlGrad{i,batchIdx} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
+                        batchAlGrad{i,batchIdx} = batchAlGrad{i,batchIdx} * invNumInBatch;
                     end
                     if ~isempty(batchBtGrad{i,batchIdx})
-                        batchBtGrad{i,batchIdx} = min(max(batchBtGrad{i,batchIdx} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
+                        batchBtGrad{i,batchIdx} = batchBtGrad{i,batchIdx} * invNumInBatch;
                     end
                     if ~isempty(batchGmGrad{i,batchIdx})
-                        batchGmGrad{i,batchIdx} = min(max(batchGmGrad{i,batchIdx} * invNumInBatch, obj.TrainingOptions.ClipDown), obj.TrainingOptions.ClipUp);
+                        batchGmGrad{i,batchIdx} = batchGmGrad{i,batchIdx} * invNumInBatch;
+                    end
+                    if ~isempty(batchGmCtxGrad{i,batchIdx})
+                        batchGmCtxGrad{i,batchIdx} = batchGmCtxGrad{i,batchIdx} * invNumInBatch;
+                    end
+                end
+
+                % --- Авто-калибровка клиппинга по первому батчу ---
+                if obj.TrainingOptions.AutoCalibrateClip && ~obj.clipAutoCalibrated
+                    allAl = []; allBt = []; allGm = []; allGmCtx = [];
+                    for i = 1:numNodes
+                        if ~isempty(batchAlGrad{i,batchIdx}), allAl = [allAl, abs(batchAlGrad{i,batchIdx}(:))']; end
+                        if ~isempty(batchBtGrad{i,batchIdx}), allBt = [allBt, abs(batchBtGrad{i,batchIdx}(:))']; end
+                        if ~isempty(batchGmGrad{i,batchIdx}), allGm = [allGm, abs(batchGmGrad{i,batchIdx}(:))']; end
+                        if ~isempty(batchGmCtxGrad{i,batchIdx}), allGmCtx = [allGmCtx, abs(batchGmCtxGrad{i,batchIdx}(:))']; end
+                    end
+                    pct = obj.TrainingOptions.ClipPercentile;
+                    cal = @(g) max(prctile(g, pct), eps);
+                    if isempty(allAl), obj.calibratedClipUpAl = 1; else, obj.calibratedClipUpAl = cal(allAl); end
+                    if isempty(allBt), obj.calibratedClipUpBt = 1; else, obj.calibratedClipUpBt = cal(allBt); end
+                    if isempty(allGm), obj.calibratedClipUpGm = 1; else, obj.calibratedClipUpGm = cal(allGm); end
+                    if isempty(allGmCtx), obj.calibratedClipUpGmCtx = 1; else, obj.calibratedClipUpGmCtx = cal(allGmCtx); end
+                    obj.calibratedClipDownAl = -obj.calibratedClipUpAl;
+                    obj.calibratedClipDownBt = -obj.calibratedClipUpBt;
+                    obj.calibratedClipDownGm = -obj.calibratedClipUpGm;
+                    obj.calibratedClipDownGmCtx = -obj.calibratedClipUpGmCtx;
+                    obj.clipAutoCalibrated = true;
+
+                    % Обновляем эффективные границы
+                    clipUpAl = obj.calibratedClipUpAl; clipDownAl = obj.calibratedClipDownAl;
+                    clipUpBt = obj.calibratedClipUpBt; clipDownBt = obj.calibratedClipDownBt;
+                    clipUpGm = obj.calibratedClipUpGm; clipDownGm = obj.calibratedClipDownGm;
+                    clipUpGmCtx = obj.calibratedClipUpGmCtx; clipDownGmCtx = obj.calibratedClipDownGmCtx;
+
+                    fprintf('\nАвто-калибровка клиппинга (P%d): α=±%.2e, β=±%.2e, γ=±%.2e, γCtx=±%.2e\n', ...
+                        pct, clipUpAl, clipUpBt, clipUpGm, clipUpGmCtx);
+                end
+
+                % --- Применение клиппинга ---
+                for i = 1:numNodes
+                    if ~isempty(batchAlGrad{i,batchIdx})
+                        batchAlGrad{i,batchIdx} = min(max(batchAlGrad{i,batchIdx}, clipDownAl), clipUpAl);
+                    end
+                    if ~isempty(batchBtGrad{i,batchIdx})
+                        batchBtGrad{i,batchIdx} = min(max(batchBtGrad{i,batchIdx}, clipDownBt), clipUpBt);
+                    end
+                    if ~isempty(batchGmGrad{i,batchIdx})
+                        batchGmGrad{i,batchIdx} = min(max(batchGmGrad{i,batchIdx}, clipDownGm), clipUpGm);
+                    end
+                    if ~isempty(batchGmCtxGrad{i,batchIdx})
+                        batchGmCtxGrad{i,batchIdx} = min(max(batchGmCtxGrad{i,batchIdx}, clipDownGmCtx), clipUpGmCtx);
                     end
                 end
 
@@ -885,36 +1081,658 @@ classdef Trainer < handle
                 beta2_t = obj.TrainingOptions.Beta2^obj.t;
                 mCorrFactor = 1 / (1 - beta1_t);
                 vCorrFactor = 1 / (1 - beta2_t);
+                lr = obj.TrainingOptions.LearningRate;
 
                 for i = 1:numNodes
                     edges = obj.outgoingEdgesCache{i};
+
+                    % Гамма обновляется всегда (не зависит от рёбер)
+                    obj.mGm{i} = obj.TrainingOptions.Beta1 * obj.mGm{i} + (1-obj.TrainingOptions.Beta1) * batchGmGrad{i,batchIdx};
+                    obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i,batchIdx}.^2);
+                    sqrtVGm = sqrt(obj.vGm{i} * vCorrFactor) + epsilon;
+                    obj.nodes(i).Gamma = max(0, obj.nodes(i).Gamma + lr * (obj.mGm{i} * mCorrFactor) / sqrtVGm);
+
+                    % GammaCtx ADAM update (всегда, не зависит от рёбер)
+                    obj.mGmCtx{i} = obj.TrainingOptions.Beta1 * obj.mGmCtx{i} + (1-obj.TrainingOptions.Beta1) * batchGmCtxGrad{i,batchIdx};
+                    obj.vGmCtx{i} = obj.TrainingOptions.Beta2 * obj.vGmCtx{i} + (1-obj.TrainingOptions.Beta2) * (batchGmCtxGrad{i,batchIdx}.^2);
+                    sqrtVGmCtx = sqrt(obj.vGmCtx{i} * vCorrFactor) + epsilon;
+                    obj.nodes(i).GammaCtx = max(0, obj.nodes(i).GammaCtx + lr * (obj.mGmCtx{i} * mCorrFactor) / sqrtVGmCtx);
+
                     if isempty(edges), continue; end
 
-                    % Обновление моментов ADAM (формулы 3.14-3.15)
+                    % Обновление моментов ADAM для alpha/beta (формулы 3.14-3.15)
                     obj.mAl{i} = obj.TrainingOptions.Beta1 * obj.mAl{i} + (1-obj.TrainingOptions.Beta1) * batchAlGrad{i,batchIdx};
                     obj.vAl{i} = obj.TrainingOptions.Beta2 * obj.vAl{i} + (1-obj.TrainingOptions.Beta2) * (batchAlGrad{i,batchIdx}.^2);
                     obj.mBt{i} = obj.TrainingOptions.Beta1 * obj.mBt{i} + (1-obj.TrainingOptions.Beta1) * batchBtGrad{i,batchIdx};
                     obj.vBt{i} = obj.TrainingOptions.Beta2 * obj.vBt{i} + (1-obj.TrainingOptions.Beta2) * (batchBtGrad{i,batchIdx}.^2);
-                    obj.mGm{i} = obj.TrainingOptions.Beta1 * obj.mGm{i} + (1-obj.TrainingOptions.Beta1) * batchGmGrad{i,batchIdx};
-                    obj.vGm{i} = obj.TrainingOptions.Beta2 * obj.vGm{i} + (1-obj.TrainingOptions.Beta2) * (batchGmGrad{i,batchIdx}.^2);
 
-                    % Применение обновлений (формула 3.16)
-                    lr = obj.learningRate * obj.TrainingOptions.NodeSize(i);
+                    % Применение обновлений alpha/beta (формула 3.16)
                     sqrtVAl = sqrt(obj.vAl{i} * vCorrFactor) + epsilon;
                     sqrtVBt = sqrt(obj.vBt{i} * vCorrFactor) + epsilon;
-                    sqrtVGm = sqrt(obj.vGm{i} * vCorrFactor) + epsilon;
-
                     alfaUpdates = lr * (obj.mAl{i} * mCorrFactor) ./ sqrtVAl;
                     betaUpdates = lr * (obj.mBt{i} * mCorrFactor) ./ sqrtVBt;
-                    obj.nodes(i).Gamma = obj.nodes(i).Gamma + lr * (obj.mGm{i} * mCorrFactor) / sqrtVGm;
 
                     for j = 1:numel(edges)
-                        edges(j).Alfa = edges(j).Alfa + alfaUpdates(j);
+                        edges(j).Alfa = max(obj.TrainingOptions.AlphaMin, edges(j).Alfa + alfaUpdates(j));
                         edges(j).Beta = edges(j).Beta + betaUpdates(j);
                     end
                 end
+
+                % --- Жёсткое ограничение устойчивости после ADAM: Σα_in(v) < 1+Σα_out(v) ---
+                sf = obj.TrainingOptions.StabilityClampFactor;
+                for iter = 1:10
+                    fixed = true;
+                    for v = 1:numNodes
+                        D_v = 1 + sum([obj.outgoingEdgesCache{v}.Alfa]);
+                        inEdges = obj.incomingEdgesCache{v};
+                        if isempty(inEdges), continue; end
+                        sumIn = sum([inEdges.Alfa]);
+                        if sumIn >= D_v
+                            scale = sf * D_v / sumIn;
+                            for e = inEdges
+                                e.Alfa = e.Alfa * scale;
+                            end
+                            fixed = false;
+                        end
+                    end
+                    if fixed, break; end
+                end
+
             end
             obj.trainErrors(end+1) = total_errors / total_points;
+        end
+
+        function topologyChanged = StructuralSearchStep(obj, XDataTrain, YDataTrain, XDataTest, YDataTest)
+            % Жадный поиск оптимальной топологии: перебирает случайные мутации,
+            % быстро обучает кандидатов и выбирает лучшего
+            topologyChanged = false;
+            obj.structuralSearchStepCount = obj.structuralSearchStepCount + 1;
+
+            opts = obj.TrainingOptions;
+
+            possibleEdges = obj.graph.getPossibleEdges();
+            existingEdges = obj.graph.getExistingEdges();
+            currentCount = obj.graph.getTotalEdgeCount();
+
+            canAdd = ~isempty(possibleEdges) && currentCount < opts.StructuralSearchMaxEdges;
+            canRemove = ~isempty(existingEdges) && currentCount > opts.StructuralSearchMinEdges;
+
+            if ~canAdd && ~canRemove
+                fprintf('[Структурная оптимизация] Нет допустимых мутаций (границы плотности).\n');
+                return;
+            end
+
+            % Сохраняем состояние исходного графа
+            savedGraph = obj.graph;
+            savedNodes = obj.nodes;
+            savedBestAl = obj.bestAl;
+            savedBestBt = obj.bestBt;
+            savedBestGm = obj.bestGm;
+            savedTrainErrors = obj.trainErrors;
+            savedTestErrors = obj.testErrors;
+            savedErrorArray = obj.errorArray;
+            savedMAl = obj.mAl; savedVAl = obj.vAl;
+            savedMBt = obj.mBt; savedVBt = obj.vBt;
+            savedMGm = obj.mGm; savedVGm = obj.vGm;
+            savedT = obj.t;
+
+            baselineError = obj.bestTestError;  % фиксированный порог для ВСЕХ кандидатов
+            bestCandidateError = Inf;
+            bestMutation = [];
+
+            % ===== Хеш текущей топологии для инвалидации глобального кеша =====
+            if isempty(existingEdges)
+                graphHash = 'no_edges';
+            else
+                parts = cell(1, size(existingEdges, 1));
+                sorted = sortrows(existingEdges, [1 2]);
+                for r = 1:size(sorted, 1)
+                    parts{r} = sprintf('%d->%d', sorted(r,1), sorted(r,2));
+                end
+                graphHash = strjoin(parts, '|');
+            end
+
+            % Инициализируем глобальный кеш при первом вызове
+            if isempty(obj.globalEdgeCache)
+                obj.globalEdgeCache = containers.Map('KeyType', 'char', 'ValueType', 'any');
+            end
+
+            % ===== Формируем пул мутаций (приоритет — непроверенным рёбрам) =====
+            % 1. Разделяем possibleEdges на непроверенные и проверенные
+            if canAdd
+                untestedAdd = []; testedAdd = [];
+                for k = 1:size(possibleEdges, 1)
+                    edgeKey = sprintf('%d->%d', possibleEdges(k,1), possibleEdges(k,2));
+                    if isKey(obj.globalEdgeCache, edgeKey)
+                        cached = obj.globalEdgeCache(edgeKey);
+                        % Совпал хеш → уже проверено при той же топологии
+                        if strcmp(cached.graphHash, graphHash)
+                            testedAdd(end+1, :) = possibleEdges(k, :);
+                            continue;
+                        end
+                        % Cooldown: ребро недавно удалено как улучшение → не проверяем
+                        if isfield(cached, 'removedInStep') && cached.removedInStep > 0 ...
+                                && obj.structuralSearchStepCount - cached.removedInStep <= obj.TrainingOptions.StructuralCooldown
+                            testedAdd(end+1, :) = possibleEdges(k, :);
+                            continue;
+                        end
+                    end
+                    untestedAdd(end+1, :) = possibleEdges(k, :);  % не проверено или топология изменилась
+                end
+                % Перемешиваем
+                if ~isempty(untestedAdd), untestedAdd = untestedAdd(randperm(size(untestedAdd,1)), :); end
+                if ~isempty(testedAdd),   testedAdd   = testedAdd(randperm(size(testedAdd,1)), :); end
+            end
+
+            % 2. Аналогично для remove
+            if canRemove
+                untestedRemove = []; testedRemove = [];
+                for k = 1:size(existingEdges, 1)
+                    edgeKey = sprintf('%d->%d', existingEdges(k,1), existingEdges(k,2));
+                    if isKey(obj.globalEdgeCache, edgeKey)
+                        cached = obj.globalEdgeCache(edgeKey);
+                        if strcmp(cached.graphHash, graphHash)
+                            testedRemove(end+1, :) = existingEdges(k, :);
+                            continue;
+                        end
+                    end
+                    untestedRemove(end+1, :) = existingEdges(k, :);
+                end
+                if ~isempty(untestedRemove), untestedRemove = untestedRemove(randperm(size(untestedRemove,1)), :); end
+                if ~isempty(testedRemove),   testedRemove   = testedRemove(randperm(size(testedRemove,1)), :); end
+            end
+
+            % 3. Двухфазная очередь: фаза 1 — связи с белыми вершинами, фаза 2 — чёрные между собой
+            whiteIndices = obj.graph.GetWhiteNodesIndices();
+
+            % Вспомогательная функция: построение очереди из классифицированных рёбер
+            function q = buildQueue(ua, ta, ur, tr)
+                pool = {};
+                for e = 1:size(ua, 1)
+                    pool{end+1} = struct('type', 'add', 'src', ua(e,1), 'dst', ua(e,2), 'prio', 1);
+                end
+                for e = 1:size(ta, 1)
+                    pool{end+1} = struct('type', 'add', 'src', ta(e,1), 'dst', ta(e,2), 'prio', 0);
+                end
+                for e = 1:size(ur, 1)
+                    pool{end+1} = struct('type', 'remove', 'src', ur(e,1), 'dst', ur(e,2), 'prio', 1);
+                end
+                for e = 1:size(tr, 1)
+                    pool{end+1} = struct('type', 'remove', 'src', tr(e,1), 'dst', tr(e,2), 'prio', 0);
+                end
+                if isempty(pool), q = {}; return; end
+
+                weighted = {};
+                for e = 1:numel(pool)
+                    weighted{end+1} = pool{e};
+                    if pool{e}.prio, weighted{end+1} = pool{e}; end
+                end
+                maxCand = min(opts.StructuralSearchCandidates, numel(pool));
+                n = min(maxCand, numel(weighted));
+                idx = randperm(numel(weighted), n);
+                seen = containers.Map('KeyType', 'char', 'ValueType', 'logical');
+                q = {};
+                for e = 1:n
+                    m = weighted{idx(e)};
+                    key = sprintf('%s:%d->%d', m.type, m.src, m.dst);
+                    if ~isKey(seen, key)
+                        seen(key) = true;
+                        q{end+1} = m;
+                    end
+                end
+            end
+
+            % Разделение add-кандидатов на белые и чёрные
+            if canAdd
+                wUntAdd = []; bUntAdd = []; wTstAdd = []; bTstAdd = [];
+                for k = 1:size(untestedAdd, 1)
+                    if ismember(untestedAdd(k,1), whiteIndices) || ismember(untestedAdd(k,2), whiteIndices)
+                        wUntAdd(end+1, :) = untestedAdd(k, :);
+                    else
+                        bUntAdd(end+1, :) = untestedAdd(k, :);
+                    end
+                end
+                for k = 1:size(testedAdd, 1)
+                    if ismember(testedAdd(k,1), whiteIndices) || ismember(testedAdd(k,2), whiteIndices)
+                        wTstAdd(end+1, :) = testedAdd(k, :);
+                    else
+                        bTstAdd(end+1, :) = testedAdd(k, :);
+                    end
+                end
+            else
+                wUntAdd = []; bUntAdd = []; wTstAdd = []; bTstAdd = [];
+            end
+
+            % Разделение remove-кандидатов на белые и чёрные
+            if canRemove
+                wUntRem = []; bUntRem = []; wTstRem = []; bTstRem = [];
+                for k = 1:size(untestedRemove, 1)
+                    if ismember(untestedRemove(k,1), whiteIndices) || ismember(untestedRemove(k,2), whiteIndices)
+                        wUntRem(end+1, :) = untestedRemove(k, :);
+                    else
+                        bUntRem(end+1, :) = untestedRemove(k, :);
+                    end
+                end
+                for k = 1:size(testedRemove, 1)
+                    if ismember(testedRemove(k,1), whiteIndices) || ismember(testedRemove(k,2), whiteIndices)
+                        wTstRem(end+1, :) = testedRemove(k, :);
+                    else
+                        bTstRem(end+1, :) = testedRemove(k, :);
+                    end
+                end
+            else
+                wUntRem = []; bUntRem = []; wTstRem = []; bTstRem = [];
+            end
+
+            whiteQueue = buildQueue(wUntAdd, wTstAdd, wUntRem, wTstRem);
+            blackQueue = buildQueue(bUntAdd, bTstAdd, bUntRem, bTstRem);
+
+            if isempty(whiteQueue) && isempty(blackQueue)
+                fprintf('[Структурная оптимизация] Все кандидаты проверены — оптимальная структура найдена.\n');
+                obj.structuralSearchConverged = true;
+                return;
+            end
+
+            % Кеш проверенных рёбер в рамках одного шага поиска (общий для обеих фаз)
+            checkedEdges = containers.Map('KeyType', 'char', 'ValueType', 'double');
+            obj.rejectedEdges = zeros(0, 2);
+            skippedCount = 0;
+
+            % Двухфазная проверка: сначала белые, потом чёрные
+            phaseNames = {'белые', 'чёрные'};
+            phaseQueues = {whiteQueue, blackQueue};
+            for phase = 1:2
+                if ~isempty(bestMutation), break; end
+                mutationQueue = phaseQueues{phase};
+                if isempty(mutationQueue), continue; end
+
+                fprintf('[Структурная оптимизация] Фаза %d (%s): проверка %d кандидатов (add=%d, remove=%d)...\n', ...
+                    phase, phaseNames{phase}, numel(mutationQueue), ...
+                    sum(cellfun(@(m) strcmp(m.type,'add'), mutationQueue)), ...
+                    sum(cellfun(@(m) strcmp(m.type,'remove'), mutationQueue)));
+
+            for c = 1:numel(mutationQueue)
+                mutation = mutationQueue{c};
+
+                % Проверка: не тестируем одно и то же ребро дважды за шаг
+                cacheKey = sprintf('%s:%d->%d', mutation.type, mutation.src, mutation.dst);
+                if isKey(checkedEdges, cacheKey)
+                    skippedCount = skippedCount + 1;
+                    fprintf('  [%d/%d] %s: %d->%d — пропущен (дубликат)\n', ...
+                        c, numel(mutationQueue), mutation.type, mutation.src, mutation.dst);
+                    continue;
+                end
+
+                % Клонируем граф и применяем мутацию
+                candidateGraph = savedGraph.clone();
+                switch mutation.type
+                    case 'add'
+                        candidateGraph.addEdgeBetween(mutation.src, mutation.dst, ...
+                            opts.StructInitAlpha, opts.StructInitBeta);
+                    case 'remove'
+                        candidateGraph.removeEdgeBetween(mutation.src, mutation.dst);
+                    case 'reconnect'
+                        candidateGraph.removeEdgeBetween(mutation.src, mutation.dst);
+                        candidateGraph.addEdgeBetween(mutation.src2, mutation.dst2, ...
+                            opts.StructInitAlpha, opts.StructInitBeta);
+                end
+
+                % Балансируем альфы под новую топологию (гарантия устойчивости)
+                candidateGraph.GenerateTopologyAwareAlpha();
+
+                % Проверяем устойчивость кандидата (условие 3.3 из рукописи)
+                [isStable, ~] = candidateGraph.checkStability();
+                if ~isStable
+                    % Кешируем неустойчивый результат, чтобы не перепроверять
+                    fprintf('  [%d/%d] %s: %d->%d — неустойчив, пропущен\n', ...
+                        c, numel(mutationQueue), mutation.type, mutation.src, mutation.dst);
+                    checkedEdges(cacheKey) = Inf;
+                    if strcmp(mutation.type, 'add') || strcmp(mutation.type, 'remove')
+                        edgeKey = sprintf('%d->%d', mutation.src, mutation.dst);
+                        obj.globalEdgeCache(edgeKey) = struct('error', Inf, 'graphHash', graphHash, 'removedInStep', 0);
+                    end
+                    continue;
+                end
+
+                % Быстрое обучение кандидата
+                fprintf('  [%d/%d] %s: %d->%d ... ', ...
+                    c, numel(mutationQueue), mutation.type, mutation.src, mutation.dst);
+                obj.graph = candidateGraph;
+                obj.nodes = candidateGraph.ListOfNodes;
+                obj.ResetTrainingState();
+
+                candidateError = obj.QuickEvaluate(XDataTrain, YDataTrain, ...
+                    XDataTest, YDataTest, opts.StructuralSearchEpochs);
+
+                % Проверяем, что новое ребро не вырождено (α,β ≈ 0 → ребро бесполезно)
+                if strcmp(mutation.type, 'add')
+                    [newAlpha, newBeta] = candidateGraph.getEdgeParams(mutation.src, mutation.dst);
+                elseif strcmp(mutation.type, 'reconnect')
+                    [newAlpha, newBeta] = candidateGraph.getEdgeParams(mutation.src2, mutation.dst2);
+                else
+                    newAlpha = 1; newBeta = 1;  % remove: проверка не нужна
+                end
+                if abs(newAlpha) < 1e-8 && abs(newBeta) < 1e-8
+                    fprintf('вырождено (α=%.2e, β=%.2e) — отклонён\n', newAlpha, newBeta);
+                    checkedEdges(cacheKey) = Inf;
+                    obj.rejectedEdges(end+1, :) = [mutation.src, mutation.dst];
+                    continue;
+                end
+
+                checkedEdges(cacheKey) = candidateError;
+
+                % Сохраняем в глобальный кеш (ключ — ребро, значение — ошибка + хеш топологии)
+                if strcmp(mutation.type, 'add') || strcmp(mutation.type, 'remove')
+                    edgeKey = sprintf('%d->%d', mutation.src, mutation.dst);
+                    obj.globalEdgeCache(edgeKey) = struct('error', candidateError, 'graphHash', graphHash, 'removedInStep', 0);
+                end
+
+                % Штраф за сложность: добавление ребра требует значимого улучшения
+                deltaEdges = 0;
+                if strcmp(mutation.type, 'add'), deltaEdges = 1;
+                elseif strcmp(mutation.type, 'remove'), deltaEdges = -1;
+                end
+                penalizedError = candidateError * (1 + opts.StructuralComplexityPenalty * deltaEdges);
+
+                if penalizedError < baselineError && candidateError < bestCandidateError
+                    bestCandidateError = candidateError;
+                    bestMutation = mutation;
+                    fprintf('MAE=%.4f ✓ (улучшение)\n', candidateError);
+                else
+                    fprintf('MAE=%.4f ✗\n', candidateError);
+                    % Отклонённое ребро — сохраняем для визуализации
+                    obj.rejectedEdges(end+1, :) = [mutation.src, mutation.dst];
+                end
+            end  % for c (mutationQueue)
+
+            if skippedCount > 0
+                fprintf('[Структурная оптимизация] Пропущено дубликатов в фазе %d (%s): %d\n', phase, phaseNames{phase}, skippedCount);
+            end
+            end  % for phase
+
+            % Если улучшений нет и все рёбра проверены — структура оптимальна
+            if isempty(bestMutation) && canAdd
+                allCovered = true;
+                for k = 1:size(possibleEdges, 1)
+                    edgeKey = sprintf('%d->%d', possibleEdges(k,1), possibleEdges(k,2));
+                    if ~isKey(obj.globalEdgeCache, edgeKey)
+                        allCovered = false; break;
+                    end
+                    cached = obj.globalEdgeCache(edgeKey);
+                    if ~strcmp(cached.graphHash, graphHash)
+                        allCovered = false; break;
+                    end
+                end
+                if allCovered
+                    fprintf('[Структурная оптимизация] Все комбинации проверены — оптимальная структура найдена.\n');
+                    obj.structuralSearchConverged = true;
+                end
+            end
+
+            % Восстанавливаем исходный граф и состояние
+            obj.graph = savedGraph;
+            obj.nodes = savedNodes;
+            obj.bestAl = savedBestAl;
+            obj.bestBt = savedBestBt;
+            obj.bestGm = savedBestGm;
+            obj.trainErrors = savedTrainErrors;
+            obj.testErrors = savedTestErrors;
+            obj.errorArray = savedErrorArray;
+            % Сбрасываем только кеши, сохраняя ADAM-моменты исходного графа
+            obj.incomingEdgesCache = {};
+            obj.outgoingEdgesCache = {};
+            obj.incomingNeighborsCache = {};
+            obj.whiteNodeIndices = [];
+            obj.blackNodeIndices = [];
+            obj.mAl = savedMAl; obj.vAl = savedVAl;
+            obj.mBt = savedMBt; obj.vBt = savedVBt;
+            obj.mGm = savedMGm; obj.vGm = savedVGm;
+            obj.t = savedT;
+
+            % Применяем лучшую мутацию к реальному графу
+            if ~isempty(bestMutation)
+                switch bestMutation.type
+                    case 'add'
+                        obj.graph.addEdgeBetween(bestMutation.src, bestMutation.dst, ...
+                            opts.StructInitAlpha, opts.StructInitBeta);
+                        fprintf('[Структурная оптимизация] Добавлено ребро %d->%d\n', bestMutation.src, bestMutation.dst);
+                    case 'remove'
+                        obj.graph.removeEdgeBetween(bestMutation.src, bestMutation.dst);
+                        fprintf('[Структурная оптимизация] Удалено ребро %d->%d\n', bestMutation.src, bestMutation.dst);
+                    case 'reconnect'
+                        obj.graph.removeEdgeBetween(bestMutation.src, bestMutation.dst);
+                        obj.graph.addEdgeBetween(bestMutation.src2, bestMutation.dst2, ...
+                            opts.StructInitAlpha, opts.StructInitBeta);
+                        fprintf('[Структурная оптимизация] Переподключено: %d->%d → %d->%d\n', ...
+                            bestMutation.src, bestMutation.dst, bestMutation.src2, bestMutation.dst2);
+                end
+
+                % Cooldown: если удалили ребро — не добавлять его обратно 2 шага
+                if strcmp(bestMutation.type, 'remove')
+                    edgeKey = sprintf('%d->%d', bestMutation.src, bestMutation.dst);
+                    if isKey(obj.globalEdgeCache, edgeKey)
+                        cached = obj.globalEdgeCache(edgeKey);
+                        cached.removedInStep = obj.structuralSearchStepCount;
+                        obj.globalEdgeCache(edgeKey) = cached;
+                    end
+                end
+
+                obj.nodes = obj.graph.ListOfNodes;
+                obj.bestTestError = bestCandidateError;
+                obj.SaveBestParameters();
+                obj.ResetTrainingStateForNewEdge();
+                obj.clipAutoCalibrated = false;
+                topologyChanged = true;
+
+                fprintf('[Структурная оптимизация] Топология улучшена! Ошибка: %.4f (рёбер: %d)\n', ...
+                    bestCandidateError, obj.graph.getTotalEdgeCount());
+            else
+                fprintf('[Структурная оптимизация] Улучшений не найдено (порог: %.4f).\n', baselineError);
+            end
+        end
+
+        function bestError = QuickEvaluate(obj, XDataTrain, YDataTrain, XDataTest, YDataTest, numEpochs)
+            % Быстрое обучение: N эпох, возвращает среднюю ошибку по всем эпохам
+            sumErrors = 0;
+            for ep = 1:numEpochs
+                obj.Compute_V5(XDataTrain, YDataTrain);
+                sumErrors = sumErrors + obj.CalculateError(XDataTest, YDataTest, ...
+                    obj.TrainingOptions.TargetNodeIndices, obj.TrainingOptions.ErrorMetric);
+            end
+            bestError = sumErrors / numEpochs;
+        end
+
+        function CleanupRedundantEdges(obj, XDataTest, YDataTest)
+            % Удаляет рёбра, не влияющие на ошибку (Δ < порог)
+            threshold = obj.TrainingOptions.StructuralCleanupThreshold;
+            if threshold == 0, return; end
+
+            whiteNodes = obj.graph.GetWhiteNodesIndices();
+            baseline = obj.CalculateError(XDataTest, YDataTest, whiteNodes, ...
+                obj.TrainingOptions.ErrorMetric);
+
+            fprintf('\n[Зачистка] Проверка %d рёбер (порог: %.1f%%, baseline: %.4f)\n', ...
+                obj.graph.getTotalEdgeCount(), threshold*100, baseline);
+
+            edges = obj.graph.getExistingEdges();
+            removed = 0;
+            for k = 1:size(edges, 1)
+                src = edges(k, 1); dst = edges(k, 2);
+                [a, b] = obj.graph.getEdgeParams(src, dst);
+
+                fprintf('  [%d/%d] %d->%d (α=%.4f, β=%.4f) — ', k, size(edges,1), src, dst, a, b);
+
+                obj.graph.removeEdgeBetween(src, dst);
+                err = obj.CalculateError(XDataTest, YDataTest, whiteNodes, ...
+                    obj.TrainingOptions.ErrorMetric);
+                delta = (err - baseline) / max(1, abs(baseline));
+
+                if delta <= threshold
+                    removed = removed + 1;
+                    fprintf('УДАЛЕНО (Δ=%.4f%%, ошибка: %.4f)\n', delta*100, err);
+                else
+                    obj.graph.addEdgeBetween(src, dst, a, b);
+                    fprintf('оставлено (Δ=%.4f%%, ошибка: %.4f)\n', delta*100, err);
+                end
+            end
+
+            if removed > 0
+                obj.nodes = obj.graph.ListOfNodes;
+                obj.ResetTrainingState();
+                fprintf('[Зачистка] Итого: удалено %d рёбер. Ошибка: %.4f → %.4f\n', ...
+                    removed, baseline, obj.CalculateError(XDataTest, YDataTest, whiteNodes, obj.TrainingOptions.ErrorMetric));
+            else
+                fprintf('[Зачистка] Все рёбра значимы (порог: %.1f%%).\n', threshold*100);
+            end
+        end
+
+        function ResetTrainingState(obj)
+            % Сбрасывает кеши и моменты ADAM при изменении топологии
+            obj.incomingEdgesCache = {};
+            obj.outgoingEdgesCache = {};
+            obj.incomingNeighborsCache = {};
+            obj.mAl = {};
+            obj.vAl = {};
+            obj.mBt = {};
+            obj.vBt = {};
+            obj.mGm = {};
+            obj.vGm = {};
+            obj.t = 0;
+            obj.whiteNodeIndices = [];
+            obj.blackNodeIndices = [];
+        end
+
+        function ResetTrainingStateForNewEdge(obj)
+            % Сброс кешей (структура изменилась), но сохранение моментов ADAM.
+            % Моменты достраиваются только для новых рёбер/вершин, старые не трогаем.
+            obj.incomingEdgesCache = {};
+            obj.outgoingEdgesCache = {};
+            obj.incomingNeighborsCache = {};
+            obj.whiteNodeIndices = [];
+            obj.blackNodeIndices = [];
+
+            numNodes = numel(obj.nodes);
+            for i = 1:numNodes
+                numEdges = numel(obj.nodes(i).getOutEdges());
+                % Gamma-моменты: инициализируем если нет (новая вершина или первый раз)
+                if numel(obj.mGm) < i || isempty(obj.mGm{i})
+                    obj.mGm{i} = 0;
+                    obj.vGm{i} = 0;
+                end
+                if numel(obj.mGmCtx) < i || isempty(obj.mGmCtx{i})
+                    obj.mGmCtx{i} = 0;
+                    obj.vGmCtx{i} = 0;
+                end
+                if numEdges == 0
+                    continue;
+                end
+                % Достраиваем моменты для рёбер
+                if numel(obj.mAl) < i || isempty(obj.mAl{i})
+                    obj.mAl{i} = zeros(1, numEdges);
+                    obj.vAl{i} = zeros(1, numEdges);
+                    obj.mBt{i} = zeros(1, numEdges);
+                    obj.vBt{i} = zeros(1, numEdges);
+                else
+                    oldLen = numel(obj.mAl{i});
+                    if numEdges > oldLen
+                        obj.mAl{i}(end+1:numEdges) = 0;
+                        obj.vAl{i}(end+1:numEdges) = 0;
+                        obj.mBt{i}(end+1:numEdges) = 0;
+                        obj.vBt{i}(end+1:numEdges) = 0;
+                    end
+                end
+            end
+        end
+
+        function UpdateStructuralPlot(obj, ax)
+            % Отображает матрицу смежности с историей ВСЕХ проверок для текущей топологии
+            % Зелёный — существующее ребро, синий — проверенный add, оранжевый — проверенный remove
+
+            n = numel(obj.graph.ListOfNodes);
+            ids = arrayfun(@(nd) nd.ID, obj.graph.ListOfNodes);
+
+            % Хеш текущей топологии (как в StructuralSearchStep)
+            existingEdges = obj.graph.getExistingEdges();
+            if isempty(existingEdges)
+                graphHash = 'no_edges';
+            else
+                parts = cell(1, size(existingEdges, 1));
+                sorted = sortrows(existingEdges, [1 2]);
+                for r = 1:size(sorted, 1)
+                    parts{r} = sprintf('%d->%d', sorted(r,1), sorted(r,2));
+                end
+                graphHash = strjoin(parts, '|');
+            end
+
+            % M: 0=untested, 1=existing, 2=tested_add, 3=tested_remove, NaN=diag
+            M = zeros(n, n);
+            hasCache = ~isempty(obj.globalEdgeCache);
+
+            for i = 1:n
+                for j = 1:n
+                    if i == j
+                        M(i,j) = NaN;
+                        continue;
+                    end
+
+                    edgeKey = sprintf('%d->%d', ids(i), ids(j));
+                    edgeExists = obj.graph.hasEdge(ids(i), ids(j));
+
+                    if edgeExists
+                        M(i,j) = 1;  % existing edge (default)
+                        if hasCache && isKey(obj.globalEdgeCache, edgeKey)
+                            cached = obj.globalEdgeCache(edgeKey);
+                            if strcmp(cached.graphHash, graphHash)
+                                M(i,j) = 3;  % tested as remove (rejected)
+                            end
+                        end
+                    else
+                        if hasCache && isKey(obj.globalEdgeCache, edgeKey)
+                            cached = obj.globalEdgeCache(edgeKey);
+                            if strcmp(cached.graphHash, graphHash)
+                                M(i,j) = 2;  % tested as add (rejected)
+                            end
+                        end
+                        % else stays 0 (untested)
+                    end
+                end
+            end
+
+            cla(ax);
+            imagesc(ax, M, [0, 3]);
+            colormap(ax, [0.85 0.85 0.85; 0.4 0.8 0.4; 0.3 0.6 1.0; 1.0 0.6 0.2]);
+
+            ax.XTick = 1:n; ax.YTick = 1:n;
+            ax.XAxisLocation = 'top';
+            ax.XTickLabel = arrayfun(@(id) sprintf('%d', id), ids, 'UniformOutput', false);
+            ax.YTickLabel = arrayfun(@(id) sprintf('%d', id), ids, 'UniformOutput', false);
+            title(ax, 'Структура модели');
+            xlabel(ax, '\rightarrow to');
+            ylabel(ax, 'from \rightarrow');
+
+            symbols = {'', '\surd', '+', '-'};
+            for i = 1:n
+                for j = 1:n
+                    if isnan(M(i,j)) || M(i,j) == 0, continue; end
+                    text(ax, j, i, symbols{M(i,j) + 1}, 'HorizontalAlignment', 'center', ...
+                        'Color', 'k', 'FontSize', 14, 'FontWeight', 'bold');
+                end
+            end
+
+            % Легенда по цветам
+            hold(ax, 'on');
+            colors = [0.85 0.85 0.85; 0.4 0.8 0.4; 0.3 0.6 1.0; 1.0 0.6 0.2];
+            labels = {'Не проверено', 'Ребро есть', 'Add (отклонён)', 'Remove (отклонён)'};
+            hDummy = zeros(1, 4);
+            for c = 1:4
+                hDummy(c) = patch(ax, NaN, NaN, colors(c,:), 'EdgeColor', 'none');
+            end
+            legend(ax, hDummy, labels, ...
+                'Location', 'southoutside', ...
+                'NumColumns', 2, ...
+                'FontSize', 8, ...
+                'Box', 'off');
+            hold(ax, 'off');
         end
     end
 end

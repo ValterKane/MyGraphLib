@@ -30,12 +30,21 @@ classdef Heating2DModel < coreFunctions.ICoreF
         function result = CalcCoreFunction(obj, InputParams)
             arguments
                 obj
-                InputParams (2,1) double {mustBePositive}
+                InputParams (:,1) double
             end
 
             % Извлечение параметров
-            T_inf = InputParams(2,1);  % Температура окружающей среды
-            time = InputParams(1,1);   % Время
+            time = InputParams(1,1);   % Время (должно быть > 0)
+            T_inf = InputParams(2,1);  % Температура окружающей среды (должна быть > 0)
+            assert(time > 0, 'time должен быть положительным');
+            assert(T_inf > 0, 'T_inf должен быть положительным');
+
+            % T₀ из контекста (третий элемент) или из конструктора
+            if size(InputParams, 1) >= 3
+                T0_used = InputParams(3,1);
+            else
+                T0_used = obj.T0;
+            end
 
             % Расчет шагов
             dx = obj.Lx/(obj.nx-1);
@@ -43,7 +52,7 @@ classdef Heating2DModel < coreFunctions.ICoreF
             dt = time/obj.nt;
 
             % Инициализация температурного поля
-            T = ones(obj.nx * obj.ny, 1) * obj.T0;
+            T = ones(obj.nx * obj.ny, 1) * T0_used;
 
             % Построение матрицы системы и правой части для неявной схемы
             N = obj.nx * obj.ny;
@@ -170,9 +179,25 @@ classdef Heating2DModel < coreFunctions.ICoreF
             result = mean(T_matrix, 'all');
         end
 
+        function tf = SupportsContext(~)
+            % Heating2DModel поддерживает контекст: T₀ из предыдущего этапа
+            tf = true;
+        end
+
+        function aug = AugmentInput(~, baseInput, ctx_vec)
+            % Берёт первый элемент контекстного вектора как T₀
+            aug = [baseInput; ctx_vec(1)];
+        end
+
+        function df_dctx = CalcContextDerivative(~, ~, ctx_vec)
+            % d(Tavg)/d(T₀) = 1 (первый элемент), остальные 0
+            df_dctx = zeros(1, length(ctx_vec));
+            df_dctx(1) = 1;
+        end
+
         function result = GetNumOfInputParams(obj)
             % Возвращает количество входных параметров
-            result = 2; % time, T_inf, дополнительный параметр
+            result = 2; % time, T_inf
         end
 
         function visualizeTemperature(obj, InputParams)
@@ -325,6 +350,7 @@ classdef Heating2DModel < coreFunctions.ICoreF
             obj.T0 = data.T0;
             obj.nt = data.nt;
         end
+
     end
 
     methods (Static)
